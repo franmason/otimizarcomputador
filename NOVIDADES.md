@@ -19,6 +19,9 @@ Escreva para quem usa o app, em frases curtas.
 - Animação da lixeira enquanto o PC é otimizado.
 - Velocímetro com ponteiro no teste de internet.
 - A nota de saúde agora considera o lixo acumulado e a última limpeza (sobe depois de otimizar), e o Diagnóstico mostra o motivo de cada ponto perdido.
+- Novo Monitor do sistema, ao vivo: processador (com cada núcleo e GHz), memória, disco, rede, temperatura e placa de vídeo, com gráfico do último minuto. Clique no "Status do sistema" para abrir.
+- Nova aba Ferramentas: economia de memória do navegador, programas usando mais memória (com botão Fechar), tempo ligado e saúde da bateria, arquivos grandes e atalhos de áudio e microfone.
+- Lembrete quando faz mais de 15 dias sem limpar.
 
 ## 1.0.0
 - Primeira versão.

@@ -8,6 +8,8 @@ App leve para Windows que faz só limpezas seguras, sem precisar de administrado
 - cache de DNS
 - diagnóstico do PC (somente leitura)
 - teste de internet (download, upload, ping e oscilação, pelos servidores de teste da Cloudflare)
+- monitor ao vivo (processador, memória, disco, rede, temperatura e placa de vídeo) e ferramentas
+  (economia de memória do navegador, programas pesados, bateria, arquivos grandes, áudio e microfone)
 - atalho para os programas de inicialização do Gerenciador de Tarefas
 
 Não mexe em registro, serviços, energia, senhas, histórico, cookies, favoritos ou arquivos pessoais,

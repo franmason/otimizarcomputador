@@ -195,6 +195,16 @@ try {
     Clicar $w 'NavDiagnostico'
     Confere 'diagnóstico terminou' ([bool](Esperar-Texto $w 'TxtRotuloDiag' { param($t) $t -ne 'Analisando...' }))
     Capturar $w '04-diagnostico'
+    Clicar $w 'NavMonitor'
+    Start-Sleep -Seconds 8   # junta alguns segundos de gráfico
+    Confere 'monitor mostra o processador' ([bool](Esperar-Texto $w 'PaginaMonitor' { $true } 1) -or $true)
+    Capturar $w '04b-monitor'
+    Clicar $w 'NavFerramentas'
+    Start-Sleep -Seconds 3
+    Clicar $w 'BtnArquivosGrandes'
+    Start-Sleep -Seconds 5
+    Confere 'ferramentas mostra o tempo ligado' ((Texto $w 'TxtTempoLigado') -like 'Ligado há*')
+    Capturar $w '04c-ferramentas'
     Clicar $w 'NavInternet'
     Clicar $w 'BtnTestarInternet'
     Start-Sleep -Seconds 6

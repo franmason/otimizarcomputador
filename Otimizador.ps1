@@ -450,6 +450,7 @@ function Calcular-NotaSaude {
         elseif ($Diag.CLivrePct -lt 15) { Descontar 15 "Pouco espaço no C: ($($Diag.CLivrePct)% livre)" }
         elseif ($Diag.CLivrePct -lt 25) { Descontar 5 "Espaço no C: ficando curto ($($Diag.CLivrePct)% livre)" }
     }
+    if ($Diag.DiasLigado -ge 7) { Descontar 5 "PC ligado há $($Diag.DiasLigado) dias sem reiniciar" }
     # O que a limpeza resolve: lixo acumulado e tempo sem limpar
     if ($Diag.LixoBytes -ge 2GB) { Descontar 15 "Muito lixo acumulado ($(Formatar-Tamanho $Diag.LixoBytes) para limpar)" }
     elseif ($Diag.LixoBytes -ge 1GB) { Descontar 10 "Lixo acumulado ($(Formatar-Tamanho $Diag.LixoBytes) para limpar)" }
@@ -466,7 +467,7 @@ function Obter-Diagnostico {
     param([int]$DiasDesdeLimpeza = -1)
     $d = [pscustomobject]@{
         Modelo = ''; Processador = ''; RamTotalGB = 0; RamUsoPct = 0; TemHDD = $false; CLivrePct = -1
-        LixoBytes = [long]0; DiasDesdeLimpeza = $DiasDesdeLimpeza; Descontos = @()
+        LixoBytes = [long]0; DiasDesdeLimpeza = $DiasDesdeLimpeza; DiasLigado = 0; Descontos = @()
         Linhas = (New-Object 'System.Collections.Generic.List[string]')
         Dicas  = (New-Object 'System.Collections.Generic.List[string]')
         Nota = 0
@@ -489,6 +490,11 @@ function Obter-Diagnostico {
         $d.RamTotalGB = [math]::Round($os.TotalVisibleMemorySize / 1MB, 1)
         $d.RamUsoPct = [math]::Round(100 * (1 - $os.FreePhysicalMemory / $os.TotalVisibleMemorySize))
         $l.Add(('Memória RAM:  {0:N1} GB, em uso: {1}%' -f $d.RamTotalGB, $d.RamUsoPct))
+        try {
+            $d.DiasLigado = [int][math]::Floor(((Get-Date) - $os.LastBootUpTime).TotalDays)
+            $l.Add("Ligado há:    $($d.DiasLigado) dia(s) sem reiniciar")
+            if ($d.DiasLigado -ge 7) { $d.Dicas.Add("O PC está há $($d.DiasLigado) dias sem reiniciar. Reiniciar (não só desligar) libera a memória. Veja em Ferramentas.") }
+        } catch { }
         if ($d.RamUsoPct -ge 80) { $d.Dicas.Add("Uso de memória alto ($($d.RamUsoPct)%). Feche abas e programas que não estiver usando.") }
     }
 
@@ -572,6 +578,156 @@ function Obter-StatusSistema {
     return $s
 }
 
+function Obter-Monitor {
+    # Leitura detalhada para o Monitor (contadores de desempenho do Windows, sem administrador).
+    # Cada consulta leva ~300 ms, então a leitura é dividida em 4 partes que rodam ao mesmo tempo
+    # ($Parte 1 a 4; 0 = tudo de uma vez).
+    param([int]$Parte = 0)
+    $m = [ordered]@{
+        Cpu = -1; Nucleos = @(); ClockAtual = 0; ClockMax = 0; NucleosFisicos = 0; Processos = 0; Threads = 0
+        Memoria = -1; MemTotal = 0; MemLivre = 0; Cache = 0; Comprometida = 0; LimiteComprometida = 0
+        DiscoAtivo = -1; Leitura = 0; Gravacao = 0; CLivrePct = -1
+        RedeDown = 0; RedeUp = 0; Adaptador = ''; Link = 0; IP = ''; Wifi = ''; Sinal = -1
+        Temperatura = -1; Gpu = -1
+    }
+    if ($Parte -in 0, 1) { try {
+        $cpus = @(Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -ErrorAction Stop)
+        $m.Cpu = [int]($cpus | Where-Object { $_.Name -eq '_Total' }).PercentProcessorTime
+        $m.Nucleos = @($cpus | Where-Object { $_.Name -ne '_Total' } | Sort-Object { [int]$_.Name } | ForEach-Object { [int]$_.PercentProcessorTime })
+    } catch { } }
+    if ($Parte -in 0, 4) { try {
+        # Dados fixos do processador: lidos uma vez e guardados (o runspace do pool é reaproveitado)
+        if (-not $global:ProcessadorFixo) {
+            $proc = Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1
+            $global:ProcessadorFixo = @{ Base = [int]$proc.MaxClockSpeed; Nucleos = [int]$proc.NumberOfCores }
+        }
+        $m.ClockMax = $global:ProcessadorFixo.Base; $m.NucleosFisicos = $global:ProcessadorFixo.Nucleos
+        $info = Get-CimInstance Win32_PerfFormattedData_Counters_ProcessorInformation -Filter "Name='_Total'" -ErrorAction Stop
+        $m.ClockAtual = [int]($m.ClockMax * [double]$info.PercentProcessorPerformance / 100)
+    } catch { } }
+    if ($Parte -in 0, 2) { try {
+        $sis = Get-CimInstance Win32_PerfFormattedData_PerfOS_System -ErrorAction Stop
+        $m.Processos = [int]$sis.Processes; $m.Threads = [int]$sis.Threads
+    } catch { } }
+    if ($Parte -in 0, 2) { try {
+        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+        $m.MemTotal = [long]$os.TotalVisibleMemorySize * 1KB; $m.MemLivre = [long]$os.FreePhysicalMemory * 1KB
+        $m.Memoria = [int][math]::Round(100 * (1 - $m.MemLivre / $m.MemTotal))
+        $mem = Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory -ErrorAction Stop
+        $m.Cache = [long]$mem.CacheBytes; $m.Comprometida = [long]$mem.CommittedBytes; $m.LimiteComprometida = [long]$mem.CommitLimit
+    } catch { } }
+    if ($Parte -in 0, 3) { try {
+        $disco = Get-CimInstance Win32_PerfFormattedData_PerfDisk_PhysicalDisk -Filter "Name='_Total'" -ErrorAction Stop
+        $m.DiscoAtivo = [int][math]::Min(100, [double]$disco.PercentDiskTime)
+        $m.Leitura = [long]$disco.DiskReadBytesPersec; $m.Gravacao = [long]$disco.DiskWriteBytesPersec
+        $c = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction Stop
+        $m.CLivrePct = [int][math]::Round(100 * $c.FreeSpace / $c.Size)
+    } catch { } }
+    if ($Parte -in 0, 3) { try {
+        foreach ($rede in @(Get-CimInstance Win32_PerfFormattedData_Tcpip_NetworkInterface -ErrorAction Stop)) {
+            $m.RedeDown += [double]$rede.BytesReceivedPersec * 8 / 1e6
+            $m.RedeUp += [double]$rede.BytesSentPersec * 8 / 1e6
+        }
+        $ativa = [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object {
+            $_.OperationalStatus -eq 'Up' -and $_.NetworkInterfaceType -ne 'Loopback' -and @($_.GetIPProperties().GatewayAddresses).Count -gt 0
+        } | Select-Object -First 1
+        if ($ativa) {
+            $m.Adaptador = if ($ativa.NetworkInterfaceType -eq 'Wireless80211') { 'Wi-Fi' } else { 'Cabo de rede' }
+            $m.Link = [int]($ativa.Speed / 1e6)
+            $ip = $ativa.GetIPProperties().UnicastAddresses | Where-Object { $_.Address.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1
+            if ($ip) { $m.IP = $ip.Address.ToString() }
+            if ($ativa.NetworkInterfaceType -eq 'Wireless80211') {
+                # netsh só lê (nome da rede e sinal); sem janela de console
+                $psi = New-Object System.Diagnostics.ProcessStartInfo('netsh.exe', 'wlan show interfaces')
+                $psi.CreateNoWindow = $true; $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true
+                $p = [System.Diagnostics.Process]::Start($psi)
+                $saida = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+                if ($saida -match '(?m)^\s*SSID\s*:\s*(.+?)\s*$') { $m.Wifi = $Matches[1] }
+                if ($saida -match '(?m)^\s*(Sinal|Signal)\s*:\s*(\d+)\s*%') { $m.Sinal = [int]$Matches[2] }
+            }
+        }
+    } catch { } }
+    if ($Parte -in 0, 4) { try {
+        # Zonas térmicas do Windows (em Kelvin); fica a maior. Nem todo PC tem.
+        $zonas = @(Get-CimInstance Win32_PerfFormattedData_Counters_ThermalZoneInformation -ErrorAction Stop | Where-Object { $_.Temperature -gt 0 })
+        if ($zonas.Count) { $m.Temperatura = [int][math]::Round((($zonas | Measure-Object -Property Temperature -Maximum).Maximum) - 273.15) }
+    } catch { } }
+    if ($Parte -in 0, 4) { try {
+        $motores = @(Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine -ErrorAction Stop | Where-Object { $_.Name -like '*engtype_3D' })
+        if ($motores.Count) { $m.Gpu = [int][math]::Min(100, ($motores | Measure-Object -Property UtilizationPercentage -Sum).Sum) }
+    } catch { } }
+    $m.Parte = $Parte
+    return [pscustomobject]$m
+}
+
+function Obter-InfoSistema {
+    # Tempo ligado desde o último reinício e bateria (só leitura)
+    $i = [pscustomobject]@{ Ligado = [timespan]::Zero; TemBateria = $false; Carga = -1; Carregando = $false; SaudePct = -1 }
+    try { $i.Ligado = (Get-Date) - (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime } catch { }
+    try {
+        $b = Get-CimInstance Win32_Battery -ErrorAction Stop | Select-Object -First 1
+        if ($b) {
+            $i.TemBateria = $true; $i.Carga = [int]$b.EstimatedChargeRemaining
+            $i.Carregando = $b.BatteryStatus -in 2, 6, 7, 8, 9
+            try {
+                $cheia = (Get-CimInstance -Namespace root\wmi -ClassName BatteryFullChargedCapacity -ErrorAction Stop | Select-Object -First 1).FullChargedCapacity
+                $projeto = (Get-CimInstance -Namespace root\wmi -ClassName BatteryStaticData -ErrorAction Stop | Select-Object -First 1).DesignedCapacity
+                if ($cheia -gt 0 -and $projeto -gt 0) { $i.SaudePct = [int][math]::Min(100, [math]::Round(100 * $cheia / $projeto)) }
+            } catch { }
+        }
+    } catch { }
+    return $i
+}
+
+function Obter-ProgramasPesados {
+    # Programas (agrupados pelo nome) que mais usam memória; "TemJanela" = dá para fechar pelo X
+    $ignorar = @('Idle', 'System', 'Registry', 'Memory Compression', 'svchost', 'csrss', 'wininit', 'winlogon', 'services', 'lsass',
+                 'smss', 'dwm', 'explorer', 'MsMpEng', 'fontdrvhost', 'Otimizador', 'powershell', 'SearchHost', 'StartMenuExperienceHost')
+    Get-Process -ErrorAction SilentlyContinue | Where-Object { $ignorar -notcontains $_.ProcessName } |
+        Group-Object -Property ProcessName | ForEach-Object {
+            [pscustomobject]@{
+                Nome = $_.Name
+                Titulo = ($_.Group | Where-Object { $_.MainWindowTitle } | Select-Object -First 1).MainWindowTitle
+                Qtd = $_.Count
+                Bytes = [long]($_.Group | Measure-Object -Property WorkingSet64 -Sum).Sum
+                TemJanela = [bool]($_.Group | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero })
+            }
+        } | Sort-Object -Property Bytes -Descending | Select-Object -First 8
+}
+
+function Obter-ArquivosGrandes {
+    # Maiores arquivos (>= 100 MB) nas pastas pessoais. Só lista; nunca segue junctions nem baixa arquivos da nuvem.
+    $pastas = @(
+        (Join-Path $env:USERPROFILE 'Downloads'),
+        [Environment]::GetFolderPath('Desktop'),
+        [Environment]::GetFolderPath('MyDocuments'),
+        [Environment]::GetFolderPath('MyVideos')
+    ) | Select-Object -Unique
+    # Pula pastas ocultas/de sistema (dados internos de programas) e pastas de desenvolvimento; no máximo 25 s
+    $ocultaOuSistema = [System.IO.FileAttributes]::Hidden -bor [System.IO.FileAttributes]::System
+    $pularNomes = @('node_modules', 'AppData')   # e toda pasta que começa com "." (.git, .next, .cache...)
+    $relogio = [System.Diagnostics.Stopwatch]::StartNew()
+    $achados = New-Object System.Collections.Generic.List[object]
+    foreach ($pasta in $pastas) {
+        if (-not $pasta -or -not [System.IO.Directory]::Exists($pasta)) { continue }
+        $pilha = New-Object 'System.Collections.Generic.Stack[System.IO.DirectoryInfo]'
+        $pilha.Push((New-Object System.IO.DirectoryInfo($pasta)))
+        while ($pilha.Count -gt 0 -and $relogio.Elapsed.TotalSeconds -lt 25) {
+            $atual = $pilha.Pop()
+            try { $itens = $atual.GetFileSystemInfos() } catch { continue }
+            foreach ($item in $itens) {
+                if (Test-PontoDeReanalise $item) { continue }
+                if ($item.Attributes -band $ocultaOuSistema) { continue }
+                if ($item -is [System.IO.DirectoryInfo]) {
+                    if ($pularNomes -notcontains $item.Name -and -not $item.Name.StartsWith('.')) { $pilha.Push($item) }
+                }
+                elseif ($item.Length -ge 100MB) { $achados.Add([pscustomobject]@{ Caminho = $item.FullName; Nome = $item.Name; Bytes = $item.Length; Data = $item.LastWriteTime }) }
+            }
+        }
+    }
+    $achados | Sort-Object -Property Bytes -Descending | Select-Object -First 15
+}
+
 # ------------------------------------------------------------------ Histórico e configurações
 
 function Ler-Json {
@@ -627,7 +783,8 @@ $script:FuncoesSegundoPlano = @(
     'Formatar-Tamanho', 'Escrever-Log', 'Test-PontoDeReanalise', 'Test-ProcessoAberto', 'Test-PastaPermitida',
     'Obter-ArquivosElegiveis', 'Limpar-Pasta', 'Remover-PastaSegura', 'Restaurar-Backup', 'Obter-InfoBackup',
     'Obter-PastasCache', 'Limpar-DNS', 'Obter-PastasDaAcao', 'Analisar-Acao', 'Executar-Acao',
-    'Calcular-NotaSaude', 'Obter-Diagnostico', 'Obter-StatusSistema'
+    'Calcular-NotaSaude', 'Obter-Diagnostico', 'Obter-StatusSistema', 'Obter-Monitor', 'Obter-InfoSistema',
+    'Obter-ProgramasPesados', 'Obter-ArquivosGrandes'
 )
 $script:VariaveisSegundoPlano = @('Acoes', 'PastaApp', 'PastaBackup', 'PastasCache', 'PastasCacheRaiz', 'FolhasAceitas', 'FilaLog')
 
@@ -643,7 +800,7 @@ function Obter-PoolSegundoPlano {
         $valor = (Get-Variable -Scope Script -Name $nome).Value
         $iss.Variables.Add((New-Object System.Management.Automation.Runspaces.SessionStateVariableEntry($nome, $valor, '')))
     }
-    $script:Pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, 3, $iss, $Host)
+    $script:Pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, 6, $iss, $Host)
     $script:Pool.Open()
     return $script:Pool
 }
@@ -937,6 +1094,8 @@ $script:Xaml = @'
             <StackPanel>
               <RadioButton x:Name="NavInicio" Style="{StaticResource Menu}" Tag="&#xE80F;" Content="Início" IsChecked="True"/>
               <RadioButton x:Name="NavDiagnostico" Style="{StaticResource Menu}" Tag="&#xE9D9;" Content="Diagnóstico"/>
+              <RadioButton x:Name="NavMonitor" Style="{StaticResource Menu}" Tag="&#xE9D2;" Content="Monitor"/>
+              <RadioButton x:Name="NavFerramentas" Style="{StaticResource Menu}" Tag="&#xE90F;" Content="Ferramentas"/>
               <RadioButton x:Name="NavInternet" Style="{StaticResource Menu}" Tag="&#xE701;" Content="Teste de internet"/>
               <RadioButton x:Name="NavHistorico" Style="{StaticResource Menu}" Tag="&#xE81C;" Content="Histórico"/>
               <RadioButton x:Name="NavInicializacao" Style="{StaticResource Menu}" Tag="&#xE7E8;" Content="Inicialização"/>
@@ -1035,12 +1194,15 @@ $script:Xaml = @'
                 </StackPanel>
               </Border>
 
-              <Border Style="{StaticResource EstiloCartao}" Margin="0,12,0,0">
+              <Border x:Name="CartaoStatus" Style="{StaticResource EstiloCartao}" Margin="0,12,0,0" Cursor="Hand"
+                      ToolTip="Clique para ver o monitor completo: temperatura, núcleos, rede ao vivo e gráficos">
                 <StackPanel>
-                  <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                  <DockPanel Margin="0,0,0,10">
+                    <TextBlock DockPanel.Dock="Right" Text="Detalhes &#xE76C;" Foreground="#4F9BFF" FontSize="11" VerticalAlignment="Center"
+                               FontFamily="Segoe UI, Segoe MDL2 Assets"/>
                     <TextBlock Text="&#xE9D9;" Style="{StaticResource Icone}" Foreground="#4F9BFF" FontSize="15" Margin="0,0,10,0"/>
                     <TextBlock Text="Status do sistema" Style="{StaticResource Titulo}" FontSize="14"/>
-                  </StackPanel>
+                  </DockPanel>
                   <StackPanel x:Name="ListaStatus"/>
                 </StackPanel>
               </Border>
@@ -1185,6 +1347,97 @@ $script:Xaml = @'
               </StackPanel>
             </Border>
           </StackPanel>
+
+          <!-- Página: Monitor do sistema (cartões criados em Criar-Monitor) -->
+          <Grid x:Name="PaginaMonitor" Visibility="Collapsed">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <DockPanel Margin="0,0,0,12">
+              <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                <Ellipse x:Name="PontoAoVivo" Width="8" Height="8" Fill="#EF4444" Margin="0,0,6,0"/>
+                <TextBlock Text="AO VIVO · últimos 60 s" Style="{StaticResource TextoSuave}" FontSize="11"/>
+              </StackPanel>
+              <StackPanel>
+                <TextBlock Text="Monitor do sistema" FontSize="24" FontWeight="Bold"/>
+                <TextBlock Style="{StaticResource TextoSuave}" FontSize="13" Text="Tudo em tempo real, atualizado a cada segundo. Só leitura."/>
+              </StackPanel>
+            </DockPanel>
+            <UniformGrid x:Name="GradeMonitor" Grid.Row="1" Columns="2" Rows="3"/>
+          </Grid>
+
+          <!-- Página: Ferramentas -->
+          <ScrollViewer x:Name="PaginaFerramentas" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" Padding="0,0,8,0">
+            <StackPanel>
+              <TextBlock Text="Ferramentas" FontSize="24" FontWeight="Bold"/>
+              <TextBlock Style="{StaticResource TextoSuave}" FontSize="13" Margin="0,0,0,14"
+                         Text="Atalhos que ajudam no dia a dia. Nada é apagado ou desligado sem você decidir."/>
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0" Margin="0,0,8,0">
+                  <Border Style="{StaticResource EstiloCartao}">
+                    <StackPanel>
+                      <TextBlock Text="Memória do navegador" Style="{StaticResource Titulo}" FontSize="14"/>
+                      <TextBlock Style="{StaticResource TextoSuave}" Margin="0,4,0,10"
+                                 Text="Ligue a economia de memória: as abas paradas deixam de ocupar memória, e você continua logado em tudo. O botão só abre a configuração; quem liga é você."/>
+                      <StackPanel Orientation="Horizontal">
+                        <Button x:Name="BtnMemoriaChrome" Style="{StaticResource BotaoContorno}" Height="36" Margin="0,0,8,0" Content="Abrir no Chrome"/>
+                        <Button x:Name="BtnMemoriaEdge" Style="{StaticResource BotaoContorno}" Height="36" Content="Abrir no Edge"/>
+                      </StackPanel>
+                    </StackPanel>
+                  </Border>
+                  <Border Style="{StaticResource EstiloCartao}" Margin="0,12,0,0">
+                    <StackPanel>
+                      <DockPanel>
+                        <Button x:Name="BtnAtualizarProgramas" DockPanel.Dock="Right" Style="{StaticResource Botao}" Padding="10,4" FontSize="11" Content="Atualizar"/>
+                        <TextBlock Text="Programas usando mais memória" Style="{StaticResource Titulo}" FontSize="14" VerticalAlignment="Center"/>
+                      </DockPanel>
+                      <TextBlock Style="{StaticResource TextoSuave}" Margin="0,4,0,10"
+                                 Text="&quot;Fechar&quot; é o mesmo que clicar no X do programa: ele pergunta se quer salvar."/>
+                      <StackPanel x:Name="ListaProgramas"/>
+                    </StackPanel>
+                  </Border>
+                  <Border Style="{StaticResource EstiloCartao}" Margin="0,12,0,0">
+                    <StackPanel>
+                      <TextBlock Text="Áudio e microfone" Style="{StaticResource Titulo}" FontSize="14"/>
+                      <TextBlock Style="{StaticResource TextoSuave}" Margin="0,4,0,10"
+                                 Text="Ninguém te ouve? Confira se o microfone certo está escolhido e se os apps têm permissão para usá-lo."/>
+                      <WrapPanel>
+                        <Button x:Name="BtnTestarMicrofone" Style="{StaticResource BotaoContorno}" Height="36" Margin="0,0,8,8" Content="Testar microfone"/>
+                        <Button x:Name="BtnPermissaoMicrofone" Style="{StaticResource BotaoContorno}" Height="36" Margin="0,0,8,8" Content="Permissão do microfone"/>
+                        <Button x:Name="BtnPainelSom" Style="{StaticResource BotaoContorno}" Height="36" Margin="0,0,8,8" Content="Painel de som"/>
+                      </WrapPanel>
+                    </StackPanel>
+                  </Border>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Margin="8,0,0,0">
+                  <Border Style="{StaticResource EstiloCartao}">
+                    <StackPanel>
+                      <TextBlock Text="Reinício e bateria" Style="{StaticResource Titulo}" FontSize="14"/>
+                      <TextBlock x:Name="TxtTempoLigado" FontSize="13" FontWeight="SemiBold" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                      <TextBlock Style="{StaticResource TextoSuave}" Margin="0,4,0,10"
+                                 Text="Reiniciar libera a memória de verdade. &quot;Desligar&quot; não basta: com a inicialização rápida do Windows, a memória não é zerada."/>
+                      <Button x:Name="BtnReiniciar" Style="{StaticResource BotaoContorno}" Height="36" HorizontalAlignment="Left" Content="Reiniciar agora"/>
+                      <TextBlock x:Name="TxtBateria" Style="{StaticResource TextoSuave}" FontSize="12.5" Margin="0,12,0,0"/>
+                    </StackPanel>
+                  </Border>
+                  <Border Style="{StaticResource EstiloCartao}" Margin="0,12,0,0">
+                    <StackPanel>
+                      <TextBlock Text="Arquivos grandes" Style="{StaticResource Titulo}" FontSize="14"/>
+                      <TextBlock Style="{StaticResource TextoSuave}" Margin="0,4,0,10"
+                                 Text="Os maiores arquivos em Downloads, Área de Trabalho, Documentos e Vídeos. O app não apaga nada: você vê e decide."/>
+                      <Button x:Name="BtnArquivosGrandes" Style="{StaticResource BotaoContorno}" Height="36" HorizontalAlignment="Left" Content="Procurar arquivos grandes"/>
+                      <StackPanel x:Name="ListaArquivosGrandes" Margin="0,10,0,0"/>
+                    </StackPanel>
+                  </Border>
+                </StackPanel>
+              </Grid>
+            </StackPanel>
+          </ScrollViewer>
 
           <!-- Página: Teste de internet -->
           <Grid x:Name="PaginaInternet" Visibility="Collapsed">
@@ -1508,10 +1761,12 @@ function Mostrar-Mensagem {
 
 function Mostrar-Pagina {
     param([string]$Nome)
-    foreach ($p in 'PaginaInicio', 'PaginaDiagnostico', 'PaginaInternet', 'PaginaHistorico', 'PaginaInicializacao', 'PaginaConfig') {
+    foreach ($p in 'PaginaInicio', 'PaginaDiagnostico', 'PaginaMonitor', 'PaginaFerramentas', 'PaginaInternet', 'PaginaHistorico', 'PaginaInicializacao', 'PaginaConfig') {
         $script:UI[$p].Visibility = if ($p -eq $Nome) { 'Visible' } else { 'Collapsed' }
     }
     if ($Nome -eq 'PaginaHistorico') { Atualizar-Historico }
+    if ($Nome -eq 'PaginaMonitor') { Iniciar-LeituraMonitor }
+    if ($Nome -eq 'PaginaFerramentas') { Atualizar-Programas; Atualizar-InfoSistema }
 }
 
 function Obter-Selecionadas {
@@ -1854,6 +2109,15 @@ function Ao-Abrir {
     }
     Atualizar-StatusBackup
     Escrever-Log 'Pronto. Clique em "Analisar" para ver o que será feito ou em "Otimizar" para limpar.'
+    # Lembrete: muito tempo sem limpar
+    $ultima = Ler-Historico | Where-Object { $_.Tipo -eq 'Otimizacao' } | Select-Object -First 1
+    if ($ultima) {
+        $dias = [int][math]::Floor(((Get-Date) - [datetime]$ultima.Data).TotalDays)
+        if ($dias -gt 15) {
+            $script:UI.TxtEstado.Text = "Última limpeza há $dias dias"
+            Escrever-Log "Faz $dias dias da última limpeza. Que tal otimizar agora?"
+        }
+    }
     Remover-PastaSegura $script:PastaDownload   # instalador baixado numa atualização anterior
     Iniciar-Diagnostico
     Iniciar-Status
@@ -1862,6 +2126,367 @@ function Ao-Abrir {
         Escrever-Log "Atualizado para a versão $($script:Versao)."
         if ($script:NotasVersao) {
             [void](Mostrar-Mensagem "O $($script:NomeApp) foi atualizado para a versão $($script:Versao).`r`n`r`nO que mudou:`r`n$($script:NotasVersao)" "Novidades da versão $($script:Versao)")
+        }
+    }
+}
+
+# ---- Monitor do sistema (ao vivo, 1 leitura por segundo, gráfico dos últimos 60 s)
+
+$script:CartoesMonitor = @(
+    @{ Id = 'Cpu';         Titulo = 'Processador';    Icone = [char]0xE9D9; Cor = '#4F9BFF' }
+    @{ Id = 'Memoria';     Titulo = 'Memória';        Icone = [char]0xE964; Cor = '#A78BFA' }
+    @{ Id = 'Disco';       Titulo = 'Disco';          Icone = [char]0xEDA2; Cor = '#22C55E' }
+    @{ Id = 'Rede';        Titulo = 'Rede';           Icone = [char]0xE701; Cor = '#06B6D4' }
+    @{ Id = 'Temperatura'; Titulo = 'Temperatura';    Icone = [char]0xE706; Cor = '#F97316' }
+    @{ Id = 'Gpu';         Titulo = 'Placa de vídeo'; Icone = [char]0xE7F4; Cor = '#EC4899' }
+)
+$script:HistMonitor = @{}
+
+function Criar-Monitor {
+    $script:UI.Monitor = @{}
+    foreach ($c in $script:CartoesMonitor) {
+        $script:HistMonitor[$c.Id] = New-Object System.Collections.Generic.List[double]
+        $borda = New-Object System.Windows.Controls.Border
+        $borda.Style = $script:UI.Janela.FindResource('EstiloCartao')
+        $borda.Margin = Espaco 0 0 12 12
+        $borda.Padding = Espaco 14 12
+
+        $painel = New-Object System.Windows.Controls.DockPanel
+        $cabecalho = New-Object System.Windows.Controls.DockPanel
+        $status = Novo-Texto '...' 11.5 '#8A97AD' 'SemiBold'
+        [System.Windows.Controls.DockPanel]::SetDock($status, 'Right')
+        $cabecalho.Children.Add($status) | Out-Null
+        $icone = Novo-Texto ([string]$c.Icone) 14 $c.Cor 'Normal' 'Segoe MDL2 Assets'
+        $icone.Margin = Espaco 0 0 8 0
+        $cabecalho.Children.Add($icone) | Out-Null
+        $cabecalho.Children.Add((Novo-Texto $c.Titulo 13 '#8A97AD' 'SemiBold')) | Out-Null
+        [System.Windows.Controls.DockPanel]::SetDock($cabecalho, 'Top')
+        $painel.Children.Add($cabecalho) | Out-Null
+
+        $linhaValor = New-Object System.Windows.Controls.DockPanel
+        $linhaValor.Margin = Espaco 0 2 0 0
+        $barras = New-Object System.Windows.Controls.StackPanel
+        $barras.Orientation = 'Horizontal'; $barras.VerticalAlignment = 'Bottom'; $barras.Height = 26
+        [System.Windows.Controls.DockPanel]::SetDock($barras, 'Right')
+        $linhaValor.Children.Add($barras) | Out-Null
+        $valor = Novo-Texto '--' 26 $null 'Bold'
+        $linhaValor.Children.Add($valor) | Out-Null
+        [System.Windows.Controls.DockPanel]::SetDock($linhaValor, 'Top')
+        $painel.Children.Add($linhaValor) | Out-Null
+
+        $detalhe = Novo-Texto '' 11.5 '#8A97AD'
+        $detalhe.Margin = Espaco 0 6 0 0
+        [System.Windows.Controls.DockPanel]::SetDock($detalhe, 'Bottom')
+        $painel.Children.Add($detalhe) | Out-Null
+
+        # Gráfico: área preenchida + linha
+        $tela = New-Object System.Windows.Controls.Canvas
+        $tela.Margin = Espaco 0 6 0 0
+        $tela.ClipToBounds = $true
+        $cor = [System.Windows.Media.ColorConverter]::ConvertFromString($c.Cor)
+        $area = New-Object System.Windows.Shapes.Polygon
+        $area.Fill = New-Object System.Windows.Media.SolidColorBrush([System.Windows.Media.Color]::FromArgb(50, $cor.R, $cor.G, $cor.B))
+        $linha = New-Object System.Windows.Shapes.Polyline
+        $linha.Stroke = Pincel $c.Cor; $linha.StrokeThickness = 2; $linha.StrokeLineJoin = 'Round'
+        $tela.Children.Add($area) | Out-Null
+        $tela.Children.Add($linha) | Out-Null
+        $painel.Children.Add($tela) | Out-Null
+
+        $borda.Child = $painel
+        $script:UI.GradeMonitor.Children.Add($borda) | Out-Null
+        $script:UI.Monitor[$c.Id] = @{ Valor = $valor; Status = $status; Detalhe = $detalhe; Tela = $tela; Area = $area; Linha = $linha; Barras = $barras; Cor = $c.Cor }
+    }
+}
+
+function Desenhar-Grafico {
+    # $Escala: valor que encosta no topo (100 para %, ou o maior valor recente para a rede)
+    param([string]$Id, [double]$Escala = 100)
+    $cartao = $script:UI.Monitor[$Id]
+    $dados = $script:HistMonitor[$Id]
+    $largura = if ($cartao.Tela.ActualWidth -gt 0) { $cartao.Tela.ActualWidth } else { 330 }
+    $altura = if ($cartao.Tela.ActualHeight -gt 10) { $cartao.Tela.ActualHeight } else { 44 }
+    $passo = $largura / 59
+    $pontos = New-Object System.Windows.Media.PointCollection
+    $inicio = 60 - $dados.Count
+    for ($i = 0; $i -lt $dados.Count; $i++) {
+        $y = $altura - 2 - ([math]::Min(1, $dados[$i] / [math]::Max(0.001, $Escala)) * ($altura - 4))
+        $pontos.Add((New-Object System.Windows.Point((($inicio + $i) * $passo), $y)))
+    }
+    $cartao.Linha.Points = $pontos
+    $poligono = New-Object System.Windows.Media.PointCollection
+    if ($pontos.Count -gt 1) {
+        $poligono.Add((New-Object System.Windows.Point($pontos[0].X, $altura)))
+        foreach ($p in $pontos) { $poligono.Add($p) }
+        $poligono.Add((New-Object System.Windows.Point($pontos[$pontos.Count - 1].X, $altura)))
+    }
+    $cartao.Area.Points = $poligono
+}
+
+function Registrar-Ponto {
+    param([string]$Id, [double]$Valor)
+    $lista = $script:HistMonitor[$Id]
+    $lista.Add([math]::Max(0, $Valor))
+    while ($lista.Count -gt 60) { $lista.RemoveAt(0) }
+}
+
+function Definir-StatusMonitor {
+    param([string]$Id, [string]$Texto, [string]$Nivel)
+    $cores = @{ Normal = '#22C55E'; Atencao = '#FACC15'; Alto = '#EF4444'; Neutro = '#8A97AD' }
+    $script:UI.Monitor[$Id].Status.Text = $Texto
+    $script:UI.Monitor[$Id].Status.Foreground = Pincel $cores[$Nivel]
+}
+
+function Atualizar-Monitor {
+    param($M)
+    $ui = $script:UI.Monitor
+    $rotulos = @{ Normal = 'Normal'; Atencao = 'Atenção'; Alto = 'Alto'; Neutro = '--' }
+
+    # Processador + barrinha por núcleo
+    if ($M.Cpu -ge 0) {
+        $ui.Cpu.Valor.Text = "$($M.Cpu)%"
+        $n = Classificar $M.Cpu 70 90; Definir-StatusMonitor 'Cpu' $rotulos[$n] $n
+        Registrar-Ponto 'Cpu' $M.Cpu; Desenhar-Grafico 'Cpu'
+        $partes = @()
+        if ($M.NucleosFisicos) { $partes += "$($M.NucleosFisicos) núcleos ($(@($M.Nucleos).Count) threads)" }
+        if ($M.ClockAtual) { $partes += ('{0:N1} GHz agora (base {1:N1} GHz)' -f ($M.ClockAtual / 1000), ($M.ClockMax / 1000)) }
+        $partes += "$($M.Processos) processos · $('{0:N0}' -f $M.Threads) threads"
+        $ui.Cpu.Detalhe.Text = $partes -join ' · '
+        $barras = $ui.Cpu.Barras
+        $nucleos = @($M.Nucleos)
+        if ($barras.Children.Count -ne $nucleos.Count) {
+            $barras.Children.Clear()
+            foreach ($x in $nucleos) {
+                $r = New-Object System.Windows.Shapes.Rectangle
+                $r.Width = [math]::Max(3, [math]::Min(8, 120 / [math]::Max(1, $nucleos.Count)))
+                $r.Margin = Espaco 1 0; $r.VerticalAlignment = 'Bottom'; $r.RadiusX = 1.5; $r.RadiusY = 1.5
+                $r.Fill = Pincel '#4F9BFF'
+                $barras.Children.Add($r) | Out-Null
+            }
+        }
+        for ($k = 0; $k -lt $nucleos.Count; $k++) { $barras.Children[$k].Height = [math]::Max(2, 26 * $nucleos[$k] / 100) }
+        $barras.ToolTip = 'Uso de cada núcleo: ' + (($nucleos | ForEach-Object { "$_%" }) -join ' · ')
+    }
+
+    # Memória
+    if ($M.Memoria -ge 0) {
+        $ui.Memoria.Valor.Text = "$($M.Memoria)%"
+        $n = Classificar $M.Memoria 80 90; Definir-StatusMonitor 'Memoria' $rotulos[$n] $n
+        Registrar-Ponto 'Memoria' $M.Memoria; Desenhar-Grafico 'Memoria'
+        $ui.Memoria.Detalhe.Text = '{0} de {1} em uso · {2} livres · cache {3} · comprometida {4} de {5}' -f
+            (Formatar-Tamanho ($M.MemTotal - $M.MemLivre)), (Formatar-Tamanho $M.MemTotal), (Formatar-Tamanho $M.MemLivre),
+            (Formatar-Tamanho $M.Cache), (Formatar-Tamanho $M.Comprometida), (Formatar-Tamanho $M.LimiteComprometida)
+    }
+
+    # Disco
+    if ($M.DiscoAtivo -ge 0) {
+        $ui.Disco.Valor.Text = "$($M.DiscoAtivo)% ativo"
+        $n = Classificar $M.DiscoAtivo 60 90; Definir-StatusMonitor 'Disco' $rotulos[$n] $n
+        Registrar-Ponto 'Disco' $M.DiscoAtivo; Desenhar-Grafico 'Disco'
+        $ui.Disco.Detalhe.Text = 'Leitura {0}/s · Gravação {1}/s · C: {2}% livre' -f (Formatar-Tamanho $M.Leitura), (Formatar-Tamanho $M.Gravacao), $M.CLivrePct
+    }
+
+    # Rede (gráfico se ajusta ao maior valor do último minuto)
+    $ui.Rede.Valor.Text = '↓ {0} ↑ {1} Mbps' -f (Formatar-Mbps $M.RedeDown), (Formatar-Mbps $M.RedeUp)
+    if ($M.Adaptador) { Definir-StatusMonitor 'Rede' 'Conectado' 'Normal' } else { Definir-StatusMonitor 'Rede' 'Sem conexão' 'Alto' }
+    Registrar-Ponto 'Rede' $M.RedeDown
+    Desenhar-Grafico 'Rede' ([math]::Max(1, ($script:HistMonitor.Rede | Measure-Object -Maximum).Maximum))
+    $partes = @()
+    if ($M.Adaptador -eq 'Wi-Fi' -and $M.Wifi) { $partes += "Wi-Fi ""$($M.Wifi)""" } elseif ($M.Adaptador) { $partes += $M.Adaptador }
+    if ($M.Sinal -ge 0) { $partes += "sinal $($M.Sinal)%" }
+    if ($M.Link) { $partes += "link $($M.Link) Mbps" }
+    if ($M.IP) { $partes += "IP $($M.IP)" }
+    $ui.Rede.Detalhe.Text = if ($partes) { $partes -join ' · ' } else { 'Sem rede ativa.' }
+
+    # Temperatura (sensor térmico do Windows; nem todo PC informa)
+    if ($M.Temperatura -gt 0) {
+        $ui.Temperatura.Valor.Text = "$($M.Temperatura) °C"
+        if ($M.Temperatura -ge 85) { Definir-StatusMonitor 'Temperatura' 'Muito quente' 'Alto' }
+        elseif ($M.Temperatura -ge 70) { Definir-StatusMonitor 'Temperatura' 'Quente' 'Atencao' }
+        else { Definir-StatusMonitor 'Temperatura' 'Normal' 'Normal' }
+        Registrar-Ponto 'Temperatura' $M.Temperatura; Desenhar-Grafico 'Temperatura' 100
+        $ui.Temperatura.Detalhe.Text = 'Sensor térmico do Windows (valor aproximado). Até 70 °C é normal em uso; acima de 85 °C, confira se as saídas de ar estão livres.'
+    } else {
+        $ui.Temperatura.Valor.Text = '--'
+        Definir-StatusMonitor 'Temperatura' 'Indisponível' 'Neutro'
+        $ui.Temperatura.Detalhe.Text = 'Este PC não informa a temperatura sem permissão de administrador.'
+    }
+
+    # Placa de vídeo
+    if ($M.Gpu -ge 0) {
+        $ui.Gpu.Valor.Text = "$($M.Gpu)%"
+        $n = Classificar $M.Gpu 70 90; Definir-StatusMonitor 'Gpu' $rotulos[$n] $n
+        Registrar-Ponto 'Gpu' $M.Gpu; Desenhar-Grafico 'Gpu'
+        $ui.Gpu.Detalhe.Text = 'Uso do processador gráfico: vídeos, chamadas com câmera e telas.'
+    } else {
+        $ui.Gpu.Valor.Text = '--'
+        Definir-StatusMonitor 'Gpu' 'Indisponível' 'Neutro'
+        $ui.Gpu.Detalhe.Text = 'O Windows não informa o uso da placa de vídeo neste PC.'
+    }
+}
+
+$script:CamposParteMonitor = @{
+    1 = @('Cpu', 'Nucleos')
+    2 = @('Processos', 'Threads', 'Memoria', 'MemTotal', 'MemLivre', 'Cache', 'Comprometida', 'LimiteComprometida')
+    3 = @('DiscoAtivo', 'Leitura', 'Gravacao', 'CLivrePct', 'RedeDown', 'RedeUp', 'Adaptador', 'Link', 'IP', 'Wifi', 'Sinal')
+    4 = @('ClockAtual', 'ClockMax', 'NucleosFisicos', 'Temperatura', 'Gpu')
+}
+
+function Iniciar-LeituraMonitor {
+    # As 4 partes rodam ao mesmo tempo; quando todas chegam, a tela é atualizada de uma vez
+    if ($script:MonitorPendentes -gt 0 -or $script:UI.PaginaMonitor.Visibility -ne 'Visible') { return }
+    $script:MonitorPendentes = 4
+    $script:MonitorLeitura = [pscustomobject]@{}
+    $script:UI.PontoAoVivo.Opacity = if ($script:UI.PontoAoVivo.Opacity -eq 1) { 0.3 } else { 1 }
+    foreach ($parte in 1..4) {
+        Iniciar-EmSegundoPlano -Parametros @{ Parte = $parte } -Trabalho { param($Parte) Obter-Monitor -Parte $Parte } -AoConcluir {
+            param($resultado, $erro)
+            $r = $resultado | Select-Object -First 1
+            if ($r) {
+                foreach ($campo in $script:CamposParteMonitor[[int]$r.Parte]) {
+                    $script:MonitorLeitura | Add-Member -NotePropertyName $campo -NotePropertyValue $r.$campo -Force
+                }
+            }
+            $script:MonitorPendentes--
+            if ($script:MonitorPendentes -le 0) {
+                $m = $script:MonitorLeitura
+                foreach ($campo in $script:CamposParteMonitor.Values | ForEach-Object { $_ }) {
+                    if ($null -eq $m.$campo) { $m | Add-Member -NotePropertyName $campo -NotePropertyValue $(if ($campo -in 'Adaptador', 'IP', 'Wifi') { '' } elseif ($campo -eq 'Nucleos') { @() } else { -1 }) -Force }
+                }
+                Atualizar-Monitor $m
+            }
+        }
+    }
+}
+
+# ---- Ferramentas
+
+function Abrir-Endereco {
+    # Abre configurações do Windows/navegador. Só abre; a pessoa decide o que mudar.
+    param([string]$Programa, [string]$Argumento, [string]$Nome)
+    try {
+        if ($Argumento) { Start-Process -FilePath $Programa -ArgumentList $Argumento } else { Start-Process -FilePath $Programa }
+    } catch {
+        [void](Mostrar-Mensagem "Não foi possível abrir: $Nome." 'Ferramentas' 'OK' 'Warning')
+    }
+}
+
+function Atualizar-Programas {
+    $script:UI.ListaProgramas.Children.Clear()
+    $script:UI.ListaProgramas.Children.Add((Novo-Texto 'Carregando...' 12 '#8A97AD')) | Out-Null
+    Iniciar-EmSegundoPlano -Trabalho { Obter-ProgramasPesados } -AoConcluir {
+        param($resultado, $erro)
+        $lista = $script:UI.ListaProgramas
+        $lista.Children.Clear()
+        foreach ($p in $resultado) {
+            $linha = New-Object System.Windows.Controls.DockPanel
+            $linha.Margin = Espaco 0 0 0 6
+            if ($p.TemJanela) {
+                $btn = New-Object System.Windows.Controls.Button
+                $btn.Style = $script:UI.Janela.FindResource('Botao')
+                $btn.Padding = Espaco 10 3; $btn.FontSize = 11; $btn.Content = 'Fechar'; $btn.Tag = $p.Nome
+                $btn.Margin = Espaco 8 0 0 0
+                [System.Windows.Automation.AutomationProperties]::SetName($btn, "Fechar $($p.Nome)")
+                $btn.Add_Click({ param($origem) Ao-FecharPrograma $origem.Tag })
+                [System.Windows.Controls.DockPanel]::SetDock($btn, 'Right')
+                $linha.Children.Add($btn) | Out-Null
+            }
+            $tam = Novo-Texto (Formatar-Tamanho $p.Bytes) 12.5 '#C9D4E5' 'SemiBold'
+            $tam.Margin = Espaco 8 0 0 0
+            [System.Windows.Controls.DockPanel]::SetDock($tam, 'Right')
+            $linha.Children.Add($tam) | Out-Null
+            $nome = if ($p.Qtd -gt 1) { "$($p.Nome) ($($p.Qtd) processos)" } else { $p.Nome }
+            $texto = Novo-Texto $nome 12.5
+            $texto.TextTrimming = 'CharacterEllipsis'; $texto.TextWrapping = 'NoWrap'
+            if ($p.Titulo) { $texto.ToolTip = $p.Titulo }
+            $linha.Children.Add($texto) | Out-Null
+            $lista.Children.Add($linha) | Out-Null
+        }
+    }
+}
+
+function Ao-FecharPrograma {
+    param([string]$Nome)
+    $msg = "Fechar o $Nome?`r`n`r`nÉ o mesmo que clicar no X: se tiver algo sem salvar, o programa vai perguntar antes de fechar."
+    if ((Mostrar-Mensagem $msg 'Fechar programa' 'YesNo' 'Question') -ne 'Yes') { return }
+    foreach ($p in @(Get-Process -Name $Nome -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero })) {
+        try { [void]$p.CloseMainWindow() } catch { }
+    }
+    Escrever-Log "Pedido para fechar: $Nome."
+    # Dá um tempo para o programa fechar e atualiza a lista
+    $t = New-Object System.Windows.Threading.DispatcherTimer
+    $t.Interval = [TimeSpan]::FromSeconds(2)
+    $t.Add_Tick({ param($s) $s.Stop(); Atualizar-Programas })
+    $t.Start()
+}
+
+function Atualizar-InfoSistema {
+    Iniciar-EmSegundoPlano -Trabalho { Obter-InfoSistema } -AoConcluir {
+        param($resultado, $erro)
+        $i = $resultado | Select-Object -First 1
+        if (-not $i) { return }
+        $dias = [int][math]::Floor($i.Ligado.TotalDays)
+        $tempo = if ($dias -ge 1) { "$dias dia(s) e $($i.Ligado.Hours) hora(s)" } else { "$($i.Ligado.Hours) hora(s) e $($i.Ligado.Minutes) minuto(s)" }
+        $script:UI.TxtTempoLigado.Text = "Ligado há $tempo sem reiniciar."
+        $script:UI.TxtTempoLigado.Foreground = Pincel $(if ($dias -ge 7) { '#FACC15' } else { '#E6EDF7' })
+        if ($dias -ge 7) { $script:UI.TxtTempoLigado.Text += ' Recomendamos reiniciar.' }
+        if ($i.TemBateria) {
+            $txt = "Bateria: $($i.Carga)%" + $(if ($i.Carregando) { ' (carregando)' } else { '' })
+            if ($i.SaudePct -gt 0) {
+                $txt += " · saúde: $($i.SaudePct)% da capacidade original"
+                if ($i.SaudePct -lt 60) { $txt += '. A bateria já está bem gasta; vale pensar em trocar.' }
+            }
+            $script:UI.TxtBateria.Text = $txt
+        } else {
+            $script:UI.TxtBateria.Text = 'Sem bateria (computador de mesa).'
+        }
+    }
+}
+
+function Ao-Reiniciar {
+    $msg = "Reiniciar o computador agora?`r`n`r`nSalve seus trabalhos e feche os programas antes. O PC reinicia em 10 segundos."
+    if ((Mostrar-Mensagem $msg 'Reiniciar' 'YesNo' 'Warning') -ne 'Yes') { return }
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo('shutdown.exe', '/r /t 10 /c "Reiniciando pelo Otimizador de PC"')
+        $psi.CreateNoWindow = $true; $psi.UseShellExecute = $false
+        [void][System.Diagnostics.Process]::Start($psi)
+    } catch {
+        [void](Mostrar-Mensagem 'Não foi possível reiniciar pelo app. Use Iniciar > Energia > Reiniciar.' 'Reiniciar' 'OK' 'Warning')
+    }
+}
+
+function Ao-ProcurarArquivosGrandes {
+    $script:UI.BtnArquivosGrandes.IsEnabled = $false
+    $script:UI.ListaArquivosGrandes.Children.Clear()
+    $script:UI.ListaArquivosGrandes.Children.Add((Novo-Texto 'Procurando... pode levar alguns segundos.' 12 '#8A97AD')) | Out-Null
+    Iniciar-EmSegundoPlano -Trabalho { Obter-ArquivosGrandes } -AoConcluir {
+        param($resultado, $erro)
+        $script:UI.BtnArquivosGrandes.IsEnabled = $true
+        $lista = $script:UI.ListaArquivosGrandes
+        $lista.Children.Clear()
+        $itens = @($resultado)
+        if ($itens.Count -eq 0) { $lista.Children.Add((Novo-Texto 'Nenhum arquivo acima de 100 MB. Tudo certo!' 12.5 '#22C55E')) | Out-Null; return }
+        $total = ($itens | Measure-Object -Property Bytes -Sum).Sum
+        $lista.Children.Add((Novo-Texto ('{0} arquivo(s) somando {1}:' -f $itens.Count, (Formatar-Tamanho $total)) 12 '#8A97AD')) | Out-Null
+        foreach ($a in $itens) {
+            $linha = New-Object System.Windows.Controls.DockPanel
+            $linha.Margin = Espaco 0 6 0 0
+            $btn = New-Object System.Windows.Controls.Button
+            $btn.Style = $script:UI.Janela.FindResource('Botao')
+            $btn.Padding = Espaco 10 3; $btn.FontSize = 11; $btn.Content = 'Mostrar'; $btn.Tag = $a.Caminho
+            $btn.Margin = Espaco 8 0 0 0
+            $btn.ToolTip = 'Abre a pasta com o arquivo selecionado'
+            $btn.Add_Click({ param($origem) Abrir-Endereco 'explorer.exe' ("/select,""$($origem.Tag)""") 'a pasta do arquivo' })
+            [System.Windows.Controls.DockPanel]::SetDock($btn, 'Right')
+            $linha.Children.Add($btn) | Out-Null
+            $tam = Novo-Texto (Formatar-Tamanho $a.Bytes) 12.5 '#C9D4E5' 'SemiBold'
+            $tam.Margin = Espaco 8 0 0 0
+            [System.Windows.Controls.DockPanel]::SetDock($tam, 'Right')
+            $linha.Children.Add($tam) | Out-Null
+            $nome = Novo-Texto $a.Nome 12.5
+            $nome.TextTrimming = 'CharacterEllipsis'; $nome.TextWrapping = 'NoWrap'
+            $nome.ToolTip = $a.Caminho
+            $linha.Children.Add($nome) | Out-Null
+            $lista.Children.Add($linha) | Out-Null
         }
     }
 }
@@ -2290,6 +2915,10 @@ function Criar-Janela {
     $script:UI.Janela = $janela
     $nomes = 'BarraTitulo', 'TxtVersao', 'BtnAtualizar', 'TxtBtnAtualizar', 'BtnMinimizar', 'BtnFechar',
              'PontoSaude', 'TxtSaudeLateral', 'NavInicio', 'NavDiagnostico', 'NavInternet', 'NavHistorico', 'NavInicializacao', 'NavConfig',
+             'NavMonitor', 'NavFerramentas', 'PaginaMonitor', 'PaginaFerramentas', 'GradeMonitor', 'PontoAoVivo', 'CartaoStatus',
+             'BtnMemoriaChrome', 'BtnMemoriaEdge', 'BtnAtualizarProgramas', 'ListaProgramas', 'BtnTestarMicrofone',
+             'BtnPermissaoMicrofone', 'BtnPainelSom', 'TxtTempoLigado', 'BtnReiniciar', 'TxtBateria', 'BtnArquivosGrandes',
+             'ListaArquivosGrandes',
              'PaginaInternet', 'ArcoFundoInternet', 'ArcoInternet', 'MarcasVelocimetro', 'Ponteiro', 'TxtUnidadeFase', 'TxtVelocidade', 'TxtFaseTeste', 'BtnTestarInternet', 'TxtBtnTestar',
              'TxtServidorTeste', 'TxtDownload', 'TxtUpload', 'TxtPing', 'TxtJitter', 'ListaAvaliacao',
              'Overlay', 'CanvasLixo', 'CorpoLixeira', 'TampaLixeira', 'SeloConcluido', 'TxtAnimTitulo', 'TxtAnimDetalhe', 'BtnFecharAnim',
@@ -2328,6 +2957,7 @@ function Criar-Janela {
     Definir-Anel $script:UI.AnelInicio 0.5 84 8
     Definir-Anel $script:UI.AnelDiag 0.5 150 12
     Montar-Velocimetro
+    Criar-Monitor
 
     # Janela
     $script:UI.BarraTitulo.Add_MouseLeftButtonDown({ $script:UI.Janela.DragMove() })
@@ -2344,6 +2974,8 @@ function Criar-Janela {
     # Menu
     $script:UI.NavInicio.Add_Checked({ Mostrar-Pagina 'PaginaInicio' })
     $script:UI.NavDiagnostico.Add_Checked({ Mostrar-Pagina 'PaginaDiagnostico' })
+    $script:UI.NavMonitor.Add_Checked({ Mostrar-Pagina 'PaginaMonitor' })
+    $script:UI.NavFerramentas.Add_Checked({ Mostrar-Pagina 'PaginaFerramentas' })
     $script:UI.NavInternet.Add_Checked({ Mostrar-Pagina 'PaginaInternet' })
     $script:UI.NavHistorico.Add_Checked({ Mostrar-Pagina 'PaginaHistorico' })
     $script:UI.NavInicializacao.Add_Checked({ Mostrar-Pagina 'PaginaInicializacao' })
@@ -2363,6 +2995,15 @@ function Criar-Janela {
     $script:UI.BtnProcurarAtualizacao.Add_Click({ Iniciar-VerificacaoAtualizacao -Manual })
     $script:UI.BtnNovidades.Add_Click({ Ao-VerNovidades })
     $script:UI.BtnTestarInternet.Add_Click({ Ao-TestarInternet })
+    $script:UI.CartaoStatus.Add_MouseLeftButtonUp({ $script:UI.NavMonitor.IsChecked = $true })
+    $script:UI.BtnMemoriaChrome.Add_Click({ Abrir-Endereco 'chrome' 'chrome://settings/performance' 'o Chrome' })
+    $script:UI.BtnMemoriaEdge.Add_Click({ Abrir-Endereco 'msedge' 'edge://settings/system' 'o Edge' })
+    $script:UI.BtnAtualizarProgramas.Add_Click({ Atualizar-Programas })
+    $script:UI.BtnTestarMicrofone.Add_Click({ Abrir-Endereco 'ms-settings:sound' $null 'as configurações de som' })
+    $script:UI.BtnPermissaoMicrofone.Add_Click({ Abrir-Endereco 'ms-settings:privacy-microphone' $null 'a permissão do microfone' })
+    $script:UI.BtnPainelSom.Add_Click({ Abrir-Endereco 'control.exe' 'mmsys.cpl' 'o painel de som' })
+    $script:UI.BtnReiniciar.Add_Click({ Ao-Reiniciar })
+    $script:UI.BtnArquivosGrandes.Add_Click({ Ao-ProcurarArquivosGrandes })
     $script:UI.BtnFecharAnim.Add_Click({ Fechar-AnimacaoOtimizacao })
 
     # Timers: tarefas/registro (rápido) e status do sistema (a cada 3 s)
@@ -2374,7 +3015,11 @@ function Criar-Janela {
     $timerStatus.Interval = [TimeSpan]::FromSeconds(3)
     $timerStatus.Add_Tick({ Iniciar-Status })
     $timerStatus.Start()
-    $script:UI.Timers = @($timer, $timerStatus)
+    $timerMonitor = New-Object System.Windows.Threading.DispatcherTimer
+    $timerMonitor.Interval = [TimeSpan]::FromSeconds(1)
+    $timerMonitor.Add_Tick({ Iniciar-LeituraMonitor })   # só lê quando a página Monitor está aberta
+    $timerMonitor.Start()
+    $script:UI.Timers = @($timer, $timerStatus, $timerMonitor)
 
     $janela.Add_ContentRendered({ Ao-Abrir })
     $janela.Add_Closed({
