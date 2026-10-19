@@ -26,8 +26,20 @@ if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -ne $info.sha256) {
 }
 
 # 2. Pega o token do GitHub guardado pelo git
-$credencial = "protocol=https`nhost=github.com`n`n" | git credential fill 2>$null
-$token = ($credencial | Where-Object { $_ -like 'password=*' }) -replace '^password=', ''
+$psi = New-Object System.Diagnostics.ProcessStartInfo('git', 'credential fill')
+$psi.UseShellExecute = $false
+$psi.RedirectStandardInput = $true
+$psi.RedirectStandardOutput = $true
+# Sem isto o .NET manda um BOM antes do texto e o git recusa o pedido
+$codificacaoAnterior = [Console]::InputEncoding
+[Console]::InputEncoding = New-Object Text.UTF8Encoding($false)
+try { $proc = [System.Diagnostics.Process]::Start($psi) } finally { [Console]::InputEncoding = $codificacaoAnterior }
+$proc.StandardInput.Write("protocol=https`nhost=github.com`n`n")
+$proc.StandardInput.Close()
+$credencial = $proc.StandardOutput.ReadToEnd() -split "`n"
+$proc.WaitForExit()
+$token = [string](($credencial | Where-Object { $_ -like 'password=*' } | Select-Object -First 1) -replace '^password=', '')
+$token = $token.Trim()
 if (-not $token) {
     Write-Host 'Login do GitHub não encontrado. Faça um "git push" uma vez para logar e tente de novo.' -ForegroundColor Red; exit 1
 }
