@@ -12,6 +12,9 @@ Escreva para quem usa o app, em frases curtas.
 - Histórico das limpezas e data da última limpeza.
 - Configurações: escolha quais ações vêm marcadas e se o app procura atualizações.
 - A janela não trava mais durante a limpeza.
+- Novas limpezas seguras: relatórios de erro antigos do Windows e cache de gráficos.
+- O cache de gráficos do Chrome e do Edge também é limpo (você continua logado em tudo).
+- Link "O que será feito?" explica cada ação em palavras simples (e ao passar o mouse).
 
 ## 1.0.0
 - Primeira versão.

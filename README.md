@@ -3,12 +3,14 @@
 App leve para Windows que faz só limpezas seguras, sem precisar de administrador:
 
 - arquivos temporários do usuário e do Windows (com mais de 1 dia)
-- cache do Chrome e do Edge (só Cache, Code Cache e GPUCache; pula o navegador se estiver aberto)
+- cache do Chrome e do Edge (só caches de arquivos e de gráficos; pula o navegador se estiver aberto)
+- relatórios de erro antigos do Windows e cache de gráficos (DirectX)
 - cache de DNS
 - diagnóstico do PC (somente leitura)
 - atalho para os programas de inicialização do Gerenciador de Tarefas
 
-Não mexe em registro, serviços, energia, senhas, histórico, cookies, favoritos ou arquivos pessoais.
+Não mexe em registro, serviços, energia, senhas, histórico, cookies, favoritos ou arquivos pessoais,
+nem em áudio/microfone ou nos dados do WhatsApp.
 Os arquivos limpos vão para um backup e podem ser devolvidos com **Desfazer** (Ctrl+Z).
 
 ## Instalar

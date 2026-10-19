@@ -200,7 +200,12 @@ try {
     Clicar $w 'NavConfig';        Capturar $w '07-configuracoes'
     Clicar $w 'NavInicio'
 
-    Write-Output '4) Analisar'
+    Write-Output '4) "O que será feito?" e Analisar'
+    Clicar $w 'BtnExplicar'
+    $m = Esperar-Janela $app.Processo.Id 'O que será feito'
+    Capturar $m '08a-o-que-sera-feito'
+    Clicar $m $OK
+    Confere 'explicação das ações abriu e fechou' ($true)
     Clicar $w 'BtnAnalisar'
     Confere 'análise mostrou o total' ([bool](Esperar-Texto $w 'TxtLog' { param($t) $t -match 'Total:' }))
     Confere 'caixa de registro visível (altura de pelo menos 60 px)' ((Achar $w 'TxtLog').Current.BoundingRectangle.Height -ge 60)

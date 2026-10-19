@@ -81,6 +81,20 @@ Confere 'recusa perfil do usuário' (-not (Test-PastaPermitida $env:USERPROFILE)
 Confere 'recusa Downloads'         (-not (Test-PastaPermitida "$env:USERPROFILE\Downloads"))
 Confere 'recusa Documentos'        (-not (Test-PastaPermitida ([Environment]::GetFolderPath('MyDocuments'))))
 Confere 'recusa vazio'             (-not (Test-PastaPermitida ''))
+Confere 'aceita relatórios de erro' (Test-PastaPermitida "$env:LOCALAPPDATA\Microsoft\Windows\WER\ReportArchive")
+Confere 'aceita cache DirectX'     (Test-PastaPermitida "$env:LOCALAPPDATA\D3DSCache")
+Confere 'recusa pasta de apps (WhatsApp)' (-not (Test-PastaPermitida "$env:LOCALAPPDATA\Packages"))
+Confere 'recusa dados do navegador inteiros' (-not (Test-PastaPermitida "$env:LOCALAPPDATA\Google\Chrome\User Data"))
+
+Write-Output '7) Pastas de cada ação'
+foreach ($acao in $script:Acoes) {
+    foreach ($pasta in (Obter-PastasDaAcao $acao)) {
+        Confere "$($acao.Nome): $pasta passa na trava" (Test-PastaPermitida $pasta)
+    }
+}
+$graficos = $script:Acoes | Where-Object { $_.Id -eq 'Graficos' }
+Confere 'cache de gráficos aponta para D3DSCache' (@($graficos.Caminhos) -contains (Join-Path $env:LOCALAPPDATA 'D3DSCache'))
+Confere 'toda ação tem explicação' (-not ($script:Acoes | Where-Object { -not $_.Explicacao }))
 
 Remover-PastaSegura $Base
 Confere 'pasta de teste apagada' (-not (Test-Path $Base))

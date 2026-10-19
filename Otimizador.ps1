@@ -6,13 +6,16 @@
       1. Limpa %TEMP% (arquivos com mais de 1 dia)
       2. Limpa C:\Windows\Temp (mesma regra; o que não tiver permissão é pulado)
       3. Limpa o cache do Chrome e do Edge (Cache, Code Cache e GPUCache dos perfis
-         Default e "Profile *"), pulando o navegador se ele estiver aberto
-      4. ipconfig /flushdns
-      5. Diagnóstico, nota de saúde e status do sistema (somente leitura)
-      6. Abre o Gerenciador de Tarefas na aba Inicialização (não desativa nada sozinho)
+         Default e "Profile *", e os caches de gráficos do navegador), pulando o
+         navegador se ele estiver aberto
+      4. Limpa relatórios de erro antigos (WER, CrashDumps) e o cache DirectX (D3DSCache)
+      5. ipconfig /flushdns
+      6. Diagnóstico, nota de saúde e status do sistema (somente leitura)
+      7. Abre o Gerenciador de Tarefas na aba Inicialização (não desativa nada sozinho)
 
     Não mexe em registro, serviços, plano de energia, efeitos visuais ou políticas.
     Não toca em Lixeira, Downloads, Documentos, histórico, senhas, cookies ou favoritos.
+    Não toca em áudio/microfone (drivers e dispositivos) nem nos dados do WhatsApp.
     Nunca segue junctions/symlinks: qualquer ponto de reanálise é ignorado.
 
     Para poder DESFAZER, os arquivos não são apagados na hora: são movidos para
@@ -56,7 +59,11 @@ $script:ArquivoHistorico = Join-Path $script:PastaApp 'historico.json'
 $script:ArquivoConfig    = Join-Path $script:PastaApp 'config.json'
 $script:DiasBackup    = 7
 $script:PastasCache   = @('Cache', 'Code Cache', 'GPUCache')
-$script:FolhasAceitas = @('Temp', 'Tmp', 'Cache', 'Code Cache', 'GPUCache')
+# Caches de gráficos na raiz do "User Data" do Chrome/Edge (o navegador recria sozinho)
+$script:PastasCacheRaiz = @('GrShaderCache', 'ShaderCache', 'GraphiteDawnCache')
+# Trava de segurança: só estas pastas (pelo nome final) podem ser limpas
+$script:FolhasAceitas = @('Temp', 'Tmp', 'Cache', 'Code Cache', 'GPUCache', 'GrShaderCache', 'ShaderCache', 'GraphiteDawnCache',
+                          'ReportArchive', 'ReportQueue', 'CrashDumps', 'D3DSCache')
 
 # Fila de mensagens do registro: pode receber linhas de qualquer thread;
 # a janela mostra o que chegar (ver Processar-Tarefas).
@@ -275,6 +282,10 @@ function Obter-PastasCache {
             if ([System.IO.Directory]::Exists($c)) { $lista += $c }
         }
     }
+    foreach ($nome in $script:PastasCacheRaiz) {
+        $c = Join-Path $DadosUsuario $nome
+        if ([System.IO.Directory]::Exists($c)) { $lista += $c }
+    }
     return $lista
 }
 
@@ -296,43 +307,66 @@ function Limpar-DNS {
 # ------------------------------------------------------------------ Ações
 # Só dados (nada de scriptblocks), para poderem ser usados nas tarefas em segundo plano.
 
+# "Explicacao" é o texto em linguagem simples mostrado em "O que será feito?" e ao passar o mouse.
 $script:Acoes = @(
     [pscustomobject]@{
         Id = 'TempUsuario'; Tipo = 'Pasta'; Nome = 'Temporários do usuário'; Icone = [char]0xE74D; Cor = '#2563EB'
         Titulo = 'Limpar arquivos temporários do usuário (%TEMP%)'
         Descricao = 'Só arquivos com mais de 1 dia. Arquivos em uso são pulados.'
-        Dias = 1; Processo = $null; Caminho = $env:TEMP; DadosUsuario = $null
+        Explicacao = 'Os programas criam arquivos temporários enquanto funcionam e muitas vezes esquecem de apagar. Com o tempo eles só ocupam espaço. Só saem os que têm mais de 1 dia e não estão em uso.'
+        Dias = 1; Processo = $null; Caminhos = @($env:TEMP); DadosUsuario = $null
     }
     [pscustomobject]@{
         Id = 'TempWindows'; Tipo = 'Pasta'; Nome = 'Temporários do Windows'; Icone = [char]0xE8B7; Cor = '#7C3AED'
         Titulo = 'Limpar temporários do Windows (C:\Windows\Temp)'
         Descricao = 'Só arquivos com mais de 1 dia. O que não tiver permissão é pulado.'
-        Dias = 1; Processo = $null; Caminho = (Join-Path $env:windir 'Temp'); DadosUsuario = $null
+        Explicacao = 'A mesma ideia, mas para os temporários do próprio Windows e de instaladores. Sobras de instalações e atualizações que já terminaram.'
+        Dias = 1; Processo = $null; Caminhos = @(Join-Path $env:windir 'Temp'); DadosUsuario = $null
     }
     [pscustomobject]@{
         Id = 'Chrome'; Tipo = 'Pasta'; Nome = 'Google Chrome'; Icone = [char]0xE774; Cor = '#EA4335'
         Titulo = 'Limpar cache do Google Chrome'
         Descricao = 'Só arquivos guardados de sites. Histórico, senhas, cookies e favoritos não são tocados. Pulado se estiver aberto.'
-        Dias = 0; Processo = 'chrome'; Caminho = $null; DadosUsuario = (Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data')
+        Explicacao = 'O Chrome guarda cópias de imagens e partes dos sites para abrir mais rápido. Esse cache cresce e pode deixar o navegador pesado. Você continua logado em tudo (CRM, e-mail, WhatsApp Web): senhas, cookies, histórico e favoritos ficam. Na primeira vez, o site pode demorar um pouco mais para abrir.'
+        Dias = 0; Processo = 'chrome'; Caminhos = @(); DadosUsuario = (Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data')
     }
     [pscustomobject]@{
         Id = 'Edge'; Tipo = 'Pasta'; Nome = 'Microsoft Edge'; Icone = [char]0xE909; Cor = '#0EA5E9'
         Titulo = 'Limpar cache do Microsoft Edge'
         Descricao = 'Mesma regra do Chrome. Pulado se o Edge estiver aberto.'
-        Dias = 0; Processo = 'msedge'; Caminho = $null; DadosUsuario = (Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data')
+        Explicacao = 'O mesmo que no Chrome, para o Edge: só as cópias de imagens e partes de sites. Logins, senhas, histórico e favoritos ficam.'
+        Dias = 0; Processo = 'msedge'; Caminhos = @(); DadosUsuario = (Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data')
+    }
+    [pscustomobject]@{
+        Id = 'Erros'; Tipo = 'Pasta'; Nome = 'Relatórios de erro'; Icone = [char]0xE7BA; Cor = '#D97706'
+        Titulo = 'Limpar relatórios de erro do Windows'
+        Descricao = 'Relatórios de travamentos antigos (mais de 1 dia). O Windows não precisa mais deles.'
+        Explicacao = 'Quando um programa trava, o Windows guarda um relatório e às vezes uma cópia da memória. Depois de enviados à Microsoft, eles só ocupam espaço, às vezes bastante.'
+        Dias = 1; Processo = $null; DadosUsuario = $null
+        Caminhos = @((Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\WER\ReportArchive'), (Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\WER\ReportQueue'), (Join-Path $env:LOCALAPPDATA 'CrashDumps'))
+    }
+    [pscustomobject]@{
+        Id = 'Graficos'; Tipo = 'Pasta'; Nome = 'Cache de gráficos'; Icone = [char]0xE7F4; Cor = '#DB2777'
+        Titulo = 'Limpar cache de gráficos (DirectX)'
+        Descricao = 'Arquivos que o Windows recria sozinho. Arquivos em uso são pulados.'
+        Explicacao = 'Pequenos arquivos que o Windows usa para desenhar janelas e vídeos mais rápido. Com o tempo acumulam versões antigas. O Windows recria o que precisar na próxima vez.'
+        Dias = 1; Processo = $null; Caminhos = @(Join-Path $env:LOCALAPPDATA 'D3DSCache'); DadosUsuario = $null
     }
     [pscustomobject]@{
         Id = 'DNS'; Tipo = 'DNS'; Nome = 'Cache de DNS'; Icone = [char]0xE839; Cor = '#0F766E'
         Titulo = 'Limpar cache de DNS (ipconfig /flushdns)'
         Descricao = 'Ajuda quando um site não abre. O Windows recria o cache sozinho, não precisa desfazer.'
-        Dias = 0; Processo = $null; Caminho = $null; DadosUsuario = $null
+        Explicacao = 'O DNS é a "agenda" que o PC usa para achar os sites. Às vezes ela guarda um endereço velho e o site não abre. Limpar faz o PC procurar o endereço certo de novo. Não muda nenhuma configuração.'
+        Dias = 0; Processo = $null; Caminhos = @(); DadosUsuario = $null
     }
 )
+
+$script:AvisoSeguranca = 'Nenhuma ação mexe em áudio, microfone, WhatsApp, programas da empresa, senhas ou arquivos pessoais. E tudo pode ser desfeito.'
 
 function Obter-PastasDaAcao {
     param($Acao)
     $pastas = @()
-    if ($Acao.Caminho) { $pastas += $Acao.Caminho }
+    foreach ($c in $Acao.Caminhos) { if ($c) { $pastas += $c } }
     if ($Acao.DadosUsuario) { $pastas += Obter-PastasCache $Acao.DadosUsuario }
     return @($pastas | Where-Object { Test-PastaPermitida $_ })
 }
@@ -539,9 +573,10 @@ function Adicionar-Historico {
 
 function Ler-Config {
     $c = Ler-Json $script:ArquivoConfig
-    $config = [pscustomobject]@{ AcoesPadrao = @($script:Acoes | ForEach-Object { $_.Id }); VerificarAtualizacoes = $true }
+    # Guarda as ações DESLIGADAS: ações novas de versões futuras já vêm ligadas.
+    $config = [pscustomobject]@{ AcoesDesligadas = @(); VerificarAtualizacoes = $true }
     if ($c) {
-        if ($null -ne $c.AcoesPadrao) { $config.AcoesPadrao = @($c.AcoesPadrao) }
+        if ($null -ne $c.AcoesDesligadas) { $config.AcoesDesligadas = @($c.AcoesDesligadas) }
         if ($null -ne $c.VerificarAtualizacoes) { $config.VerificarAtualizacoes = [bool]$c.VerificarAtualizacoes }
     }
     return $config
@@ -564,7 +599,7 @@ $script:FuncoesSegundoPlano = @(
     'Obter-PastasCache', 'Limpar-DNS', 'Obter-PastasDaAcao', 'Analisar-Acao', 'Executar-Acao',
     'Calcular-NotaSaude', 'Obter-Diagnostico', 'Obter-StatusSistema'
 )
-$script:VariaveisSegundoPlano = @('Acoes', 'PastaApp', 'PastaBackup', 'PastasCache', 'FolhasAceitas', 'FilaLog')
+$script:VariaveisSegundoPlano = @('Acoes', 'PastaApp', 'PastaBackup', 'PastasCache', 'PastasCacheRaiz', 'FolhasAceitas', 'FilaLog')
 
 function Obter-PoolSegundoPlano {
     # Um pool de runspaces criado uma vez e reaproveitado (o status roda a cada 3 s).
@@ -888,7 +923,7 @@ $script:Xaml = @'
                 <Run Text="Vamos deixar seu PC"/> <Run Text="mais rápido e leve" Foreground="#4F9BFF"/>
               </TextBlock>
               <TextBlock Style="{StaticResource TextoSuave}" FontSize="13" Margin="0,4,0,0"
-                         Text="Escolha o que limpar e clique em Otimizar. Tudo pode ser desfeito."/>
+                         Text="Escolha o que limpar e clique em Otimizar. Nada mexe em áudio, microfone ou WhatsApp, e tudo pode ser desfeito."/>
             </StackPanel>
 
             <Border Grid.Row="1" Grid.Column="0" Style="{StaticResource EstiloCartao}" Padding="14,12,8,4">
@@ -933,6 +968,13 @@ $script:Xaml = @'
                       <TextBlock Text="Saúde do PC" Style="{StaticResource TextoSuave}"/>
                       <TextBlock x:Name="TxtEstado" Text="Pronto para otimizar" FontWeight="SemiBold" FontSize="14" TextWrapping="Wrap" Margin="0,2,0,0"/>
                       <TextBlock x:Name="TxtSelecionadas" Style="{StaticResource TextoSuave}" Margin="0,2,0,0"/>
+                      <Button x:Name="BtnExplicar" Cursor="Hand" HorizontalAlignment="Left" Margin="0,3,0,0"
+                              ToolTip="Explica em palavras simples cada ação marcada">
+                        <Button.Template>
+                          <ControlTemplate TargetType="Button"><ContentPresenter/></ControlTemplate>
+                        </Button.Template>
+                        <TextBlock Text="O que será feito?" Foreground="#4F9BFF" FontSize="12" TextDecorations="Underline"/>
+                      </Button>
                     </StackPanel>
                   </Grid>
                   <ProgressBar x:Name="BarraProgresso" Height="4" Margin="0,12,0,0" IsIndeterminate="True"
@@ -1236,6 +1278,8 @@ function Nova-LinhaInterruptor {
     $grade.Children.Add($chave) | Out-Null
 
     $borda.Child = $grade
+    $borda.ToolTip = $Acao.Explicacao
+    [System.Windows.Controls.ToolTipService]::SetShowDuration($borda, 30000)
     return @{ Linha = $borda; Chave = $chave }
 }
 
@@ -1286,6 +1330,14 @@ function Mostrar-Pagina {
 
 function Obter-Selecionadas {
     return @($script:Acoes | Where-Object { $script:UI.Chaves[$_.Id].IsChecked })
+}
+
+function Ao-Explicar {
+    $acoes = Obter-Selecionadas
+    if ($acoes.Count -eq 0) { [void](Mostrar-Mensagem 'Nenhuma ação marcada. Ligue as que quiser na lista "Ações de limpeza".' 'O que será feito'); return }
+    $partes = foreach ($a in $acoes) { "■ $($a.Nome)`r`n$($a.Explicacao)" }
+    $msg = "Ao clicar em Otimizar, o app vai:`r`n`r`n" + ($partes -join "`r`n`r`n") + "`r`n`r`n$($script:AvisoSeguranca)"
+    [void](Mostrar-Mensagem $msg 'O que será feito')
 }
 
 function Atualizar-Selecionadas {
@@ -1484,6 +1536,7 @@ function Ao-Otimizar {
         $linhas = foreach ($r in $resultado) { "- $($r.Acao.Nome): $($r.Mensagem)" }
         $msg = "Será feito:`r`n`r`n" + ($linhas -join "`r`n")
         $msg += "`r`n`r`nOs arquivos ficam guardados em backup por até $($script:DiasBackup) dias. Para devolvê-los, use 'Desfazer'."
+        $msg += "`r`n$($script:AvisoSeguranca)"
         $temBackup = [bool](Obter-InfoBackup)
         if ($temBackup) { $msg += "`r`n`r`nAtenção: o backup da limpeza anterior será apagado de vez." }
         $msg += "`r`n`r`nDeseja continuar?"
@@ -1580,7 +1633,7 @@ function Ao-VerNovidades {
 
 function Salvar-Preferencias {
     $config = [pscustomobject]@{
-        AcoesPadrao = @($script:Acoes | Where-Object { $script:UI.ChavesConfig[$_.Id].IsChecked } | ForEach-Object { $_.Id })
+        AcoesDesligadas = @($script:Acoes | Where-Object { -not $script:UI.ChavesConfig[$_.Id].IsChecked } | ForEach-Object { $_.Id })
         VerificarAtualizacoes = [bool]$script:UI.ChkVerificarAtualizacoes.IsChecked
     }
     Salvar-Config $config
@@ -1612,7 +1665,7 @@ function Criar-Janela {
     $nomes = 'BarraTitulo', 'TxtVersao', 'BtnAtualizar', 'TxtBtnAtualizar', 'BtnMinimizar', 'BtnFechar',
              'PontoSaude', 'TxtSaudeLateral', 'NavInicio', 'NavDiagnostico', 'NavHistorico', 'NavInicializacao', 'NavConfig',
              'PaginaInicio', 'PaginaDiagnostico', 'PaginaHistorico', 'PaginaInicializacao', 'PaginaConfig',
-             'ListaAcoes', 'BtnLimparLog', 'TxtLog', 'AnelInicio', 'TxtNotaInicio', 'TxtEstado', 'TxtSelecionadas',
+             'ListaAcoes', 'BtnLimparLog', 'TxtLog', 'AnelInicio', 'TxtNotaInicio', 'TxtEstado', 'TxtSelecionadas', 'BtnExplicar',
              'BarraProgresso', 'BtnOtimizar', 'BtnAnalisar', 'ListaStatus', 'BtnVerHistorico', 'TxtUltimaLimpeza',
              'TxtBackup', 'BtnDesfazer', 'BtnEsvaziar', 'BtnAtualizarDiag', 'AnelDiag', 'TxtNotaDiag', 'TxtRotuloDiag',
              'ListaDicas', 'TxtDiagnostico', 'TxtHistoricoVazio', 'ListaHistorico', 'BtnAbrirInicializacao',
@@ -1628,7 +1681,7 @@ function Criar-Janela {
     $script:UI.Chaves = @{}
     $script:UI.ChavesConfig = @{}
     foreach ($acao in $script:Acoes) {
-        $marcada = $config.AcoesPadrao -contains $acao.Id
+        $marcada = $config.AcoesDesligadas -notcontains $acao.Id
         $item = Nova-LinhaInterruptor $acao $marcada
         $script:UI.ListaAcoes.Children.Add($item.Linha) | Out-Null
         $script:UI.Chaves[$acao.Id] = $item.Chave
@@ -1668,6 +1721,7 @@ function Criar-Janela {
     # Botões
     $script:UI.BtnOtimizar.Add_Click({ Ao-Otimizar })
     $script:UI.BtnAnalisar.Add_Click({ Ao-Analisar })
+    $script:UI.BtnExplicar.Add_Click({ Ao-Explicar })
     $script:UI.BtnDesfazer.Add_Click({ Ao-Desfazer })
     $script:UI.BtnEsvaziar.Add_Click({ Ao-Esvaziar })
     $script:UI.BtnLimparLog.Add_Click({ $script:UI.TxtLog.Clear() })
