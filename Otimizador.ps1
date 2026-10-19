@@ -1458,7 +1458,7 @@ $script:Xaml = @'
               <Border Style="{StaticResource EstiloCartao}" Padding="20" VerticalAlignment="Top">
                 <StackPanel>
                   <!-- Velocímetro: arco de 240°, marcas, ponteiro e valor no centro (desenhado em Montar-Velocimetro) -->
-                  <Canvas Width="290" Height="215" HorizontalAlignment="Center">
+                  <Canvas Width="290" Height="238" HorizontalAlignment="Center">
                     <Path x:Name="ArcoFundoInternet" Stroke="#1F2C45" StrokeThickness="14" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
                     <Path x:Name="ArcoInternet" StrokeThickness="14" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
                     <Canvas x:Name="MarcasVelocimetro"/>
@@ -1472,7 +1472,7 @@ $script:Xaml = @'
                       <Path.RenderTransform><RotateTransform CenterX="145" CenterY="135" Angle="-120"/></Path.RenderTransform>
                     </Path>
                     <Ellipse Canvas.Left="133" Canvas.Top="123" Width="24" Height="24" Fill="#111A2B" Stroke="#FFFFFF" StrokeThickness="3"/>
-                    <StackPanel Canvas.Left="70" Canvas.Top="152" Width="150">
+                    <StackPanel Canvas.Left="70" Canvas.Top="184" Width="150">
                       <TextBlock x:Name="TxtVelocidade" Text="0" FontSize="34" FontWeight="Bold" HorizontalAlignment="Center"/>
                       <TextBlock x:Name="TxtUnidadeFase" Text="Mbps" Style="{StaticResource TextoSuave}" FontSize="12" HorizontalAlignment="Center"/>
                     </StackPanel>
