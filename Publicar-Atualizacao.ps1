@@ -1,9 +1,8 @@
 ﻿# Publica a versão atual como uma Release no GitHub. Os apps instalados
 # mostram o botão "Atualizar" na próxima vez que forem abertos.
 #
-# Antes: mude $script:Versao no Otimizador.ps1, rode
-#   .\Gerar-EXE.ps1 -Novidades "O que mudou nesta versão"
-# e envie o código (git commit + git push).
+# Antes: mude $script:Versao no Otimizador.ps1, escreva as novidades no NOVIDADES.md,
+# rode .\Gerar-EXE.ps1 e envie o código (git commit + git push).
 # Depois:
 #   .\Publicar-Atualizacao.ps1
 #
