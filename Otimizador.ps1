@@ -443,7 +443,9 @@ function Obter-Diagnostico {
         $slots = (@(Get-CimInstance Win32_PhysicalMemoryArray -ErrorAction Stop) | Measure-Object -Property MemoryDevices -Sum).Sum
         foreach ($p in $pentes) {
             $vel = if ($p.ConfiguredClockSpeed) { $p.ConfiguredClockSpeed } else { $p.Speed }
-            $l.Add(('  Pente {0}: {1:N0} GB, {2} MHz' -f $p.DeviceLocator, ($p.Capacity / 1GB), $vel))
+            $linhaPente = '  Pente {0}: {1:N0} GB' -f $p.DeviceLocator, ($p.Capacity / 1GB)
+            if ($vel) { $linhaPente += ", $vel MHz" }
+            $l.Add($linhaPente)
         }
         if ($slots) {
             $livres = [math]::Max(0, $slots - $pentes.Count)
@@ -754,6 +756,41 @@ $script:Xaml = @'
       </Setter>
     </Style>
 
+    <!-- Barras de rolagem finas e escuras (as padrão do Windows ficam brancas) -->
+    <ControlTemplate x:Key="PolegarRolagem" TargetType="Thumb">
+      <Border CornerRadius="4" Background="#2A3A5C"/>
+    </ControlTemplate>
+    <Style TargetType="ScrollBar">
+      <Setter Property="Width" Value="8"/>
+      <Setter Property="MinWidth" Value="8"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ScrollBar">
+            <Track x:Name="PART_Track" Orientation="Vertical" IsDirectionReversed="True">
+              <Track.Thumb><Thumb Template="{StaticResource PolegarRolagem}"/></Track.Thumb>
+            </Track>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+      <Style.Triggers>
+        <Trigger Property="Orientation" Value="Horizontal">
+          <Setter Property="Width" Value="Auto"/>
+          <Setter Property="MinWidth" Value="0"/>
+          <Setter Property="Height" Value="8"/>
+          <Setter Property="Template">
+            <Setter.Value>
+              <ControlTemplate TargetType="ScrollBar">
+                <Track x:Name="PART_Track" Orientation="Horizontal">
+                  <Track.Thumb><Thumb Template="{StaticResource PolegarRolagem}"/></Track.Thumb>
+                </Track>
+              </ControlTemplate>
+            </Setter.Value>
+          </Setter>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+
     <Style x:Key="Registro" TargetType="TextBox">
       <Setter Property="Background" Value="#0B1322"/>
       <Setter Property="Foreground" Value="#C9D4E5"/>
@@ -826,7 +863,7 @@ $script:Xaml = @'
               <RadioButton x:Name="NavInicio" Style="{StaticResource Menu}" Tag="&#xE80F;" Content="Início" IsChecked="True"/>
               <RadioButton x:Name="NavDiagnostico" Style="{StaticResource Menu}" Tag="&#xE9D9;" Content="Diagnóstico"/>
               <RadioButton x:Name="NavHistorico" Style="{StaticResource Menu}" Tag="&#xE81C;" Content="Histórico"/>
-              <RadioButton x:Name="NavInicializacao" Style="{StaticResource Menu}" Tag="&#xE7E8;" Content="Programas de inicialização"/>
+              <RadioButton x:Name="NavInicializacao" Style="{StaticResource Menu}" Tag="&#xE7E8;" Content="Inicialização"/>
               <RadioButton x:Name="NavConfig" Style="{StaticResource Menu}" Tag="&#xE713;" Content="Configurações"/>
             </StackPanel>
           </DockPanel>
@@ -842,28 +879,31 @@ $script:Xaml = @'
             </Grid.ColumnDefinitions>
             <Grid.RowDefinitions>
               <RowDefinition Height="Auto"/>
-              <RowDefinition Height="Auto"/>
               <RowDefinition Height="*"/>
+              <RowDefinition Height="138"/>
             </Grid.RowDefinitions>
 
-            <StackPanel Grid.Row="0" Grid.Column="0" Margin="0,0,0,14">
-              <TextBlock Text="Olá! Vamos deixar seu PC" FontSize="25" FontWeight="Bold"/>
-              <TextBlock Text="mais rápido e leve?" FontSize="25" FontWeight="Bold" Foreground="#4F9BFF"/>
-              <TextBlock Style="{StaticResource TextoSuave}" FontSize="13" Margin="0,6,0,0"
+            <StackPanel Grid.Row="0" Grid.Column="0" Margin="0,0,0,12">
+              <TextBlock FontSize="23" FontWeight="Bold" TextWrapping="Wrap">
+                <Run Text="Vamos deixar seu PC"/> <Run Text="mais rápido e leve" Foreground="#4F9BFF"/>
+              </TextBlock>
+              <TextBlock Style="{StaticResource TextoSuave}" FontSize="13" Margin="0,4,0,0"
                          Text="Escolha o que limpar e clique em Otimizar. Tudo pode ser desfeito."/>
             </StackPanel>
 
-            <Border Grid.Row="1" Grid.Column="0" Style="{StaticResource EstiloCartao}" Padding="14,14,14,6">
-              <StackPanel>
-                <StackPanel Orientation="Horizontal" Margin="2,0,0,10">
+            <Border Grid.Row="1" Grid.Column="0" Style="{StaticResource EstiloCartao}" Padding="14,12,8,4">
+              <DockPanel>
+                <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="2,0,0,10">
                   <TextBlock Text="&#xE945;" Style="{StaticResource Icone}" Foreground="#4F9BFF" FontSize="16" Margin="0,0,10,0"/>
                   <StackPanel>
                     <TextBlock Text="Ações de limpeza" Style="{StaticResource Titulo}"/>
                     <TextBlock Text="Escolha o que deseja fazer e clique em &quot;Otimizar&quot;." Style="{StaticResource TextoSuave}"/>
                   </StackPanel>
                 </StackPanel>
-                <StackPanel x:Name="ListaAcoes"/>
-              </StackPanel>
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="0,0,6,0">
+                  <StackPanel x:Name="ListaAcoes"/>
+                </ScrollViewer>
+              </DockPanel>
             </Border>
 
             <Border Grid.Row="2" Grid.Column="0" Style="{StaticResource EstiloCartao}" Margin="0,12,0,0" Padding="14,10,14,14">
@@ -956,7 +996,7 @@ $script:Xaml = @'
                             ToolTip="Apaga de vez o backup para liberar o espaço">
                       <StackPanel Orientation="Horizontal">
                         <TextBlock Text="&#xE74D;" Style="{StaticResource Icone}" Margin="0,0,6,0"/>
-                        <TextBlock Text="Esvaziar backup"/>
+                        <TextBlock Text="Esvaziar"/>
                       </StackPanel>
                     </Button>
                   </Grid>
@@ -1062,19 +1102,29 @@ $script:Xaml = @'
           </StackPanel>
 
           <!-- Página: Configurações -->
-          <ScrollViewer x:Name="PaginaConfig" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
-            <StackPanel>
+          <Grid x:Name="PaginaConfig" Visibility="Collapsed">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <StackPanel Grid.ColumnSpan="2" Margin="0,0,0,14">
               <TextBlock Text="Configurações" FontSize="24" FontWeight="Bold"/>
-              <TextBlock Style="{StaticResource TextoSuave}" FontSize="13" Margin="0,0,0,14"
+              <TextBlock Style="{StaticResource TextoSuave}" FontSize="13"
                          Text="Preferências do Otimizador. Nada aqui muda configurações do Windows."/>
+            </StackPanel>
+            <Border Grid.Row="1" Style="{StaticResource EstiloCartao}" VerticalAlignment="Top">
+              <StackPanel>
+                <TextBlock Text="Ações marcadas ao abrir o app" Style="{StaticResource Titulo}" FontSize="14"/>
+                <TextBlock Style="{StaticResource TextoSuave}" Margin="0,2,0,10" Text="As que ficarem ligadas aqui já vêm marcadas na tela inicial."/>
+                <StackPanel x:Name="ListaConfigAcoes"/>
+              </StackPanel>
+            </Border>
+            <StackPanel Grid.Row="1" Grid.Column="1" Margin="16,0,0,0">
               <Border Style="{StaticResource EstiloCartao}">
-                <StackPanel>
-                  <TextBlock Text="Ações marcadas ao abrir o app" Style="{StaticResource Titulo}" FontSize="14"/>
-                  <TextBlock Style="{StaticResource TextoSuave}" Margin="0,2,0,10" Text="As que ficarem ligadas aqui já vêm marcadas na tela inicial."/>
-                  <StackPanel x:Name="ListaConfigAcoes"/>
-                </StackPanel>
-              </Border>
-              <Border Style="{StaticResource EstiloCartao}" Margin="0,12,0,0">
                 <StackPanel>
                   <TextBlock Text="Atualizações" Style="{StaticResource Titulo}" FontSize="14"/>
                   <DockPanel Margin="0,10,0,0">
@@ -1108,7 +1158,7 @@ $script:Xaml = @'
                 </StackPanel>
               </Border>
             </StackPanel>
-          </ScrollViewer>
+          </Grid>
         </Grid>
       </Grid>
     </Grid>
@@ -1147,8 +1197,8 @@ function Nova-LinhaInterruptor {
     $borda.BorderBrush = Pincel '#1C2840'
     $borda.BorderThickness = Espaco 1
     $borda.CornerRadius = New-Object System.Windows.CornerRadius(10)
-    $borda.Padding = if ($Compacta) { Espaco 10 7 } else { Espaco 12 9 }
-    $borda.Margin = Espaco 0 0 0 8
+    $borda.Padding = if ($Compacta) { Espaco 10 6 } else { Espaco 12 8 }
+    $borda.Margin = Espaco 0 0 0 6
 
     $grade = New-Object System.Windows.Controls.Grid
     foreach ($largura in '46', '*', 'Auto') {
@@ -1316,7 +1366,7 @@ function Atualizar-Saude {
     $script:UI.TxtNotaDiag.Text = [string]$Diag.Nota
     $script:UI.TxtRotuloDiag.Text = $cor.Rotulo
     $script:UI.TxtRotuloDiag.Foreground = Pincel $cor.Cor
-    $script:UI.TxtSaudeLateral.Text = "Saúde do PC: $($Diag.Nota)/100 · $($cor.Rotulo)"
+    $script:UI.TxtSaudeLateral.Text = "Saúde do PC: $($Diag.Nota) · $($cor.Rotulo)"
     $script:UI.PontoSaude.Fill = Pincel $cor.Cor
     $script:UI.TxtDiagnostico.Text = ($Diag.Linhas -join "`r`n")
 

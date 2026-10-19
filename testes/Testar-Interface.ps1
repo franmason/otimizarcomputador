@@ -90,9 +90,17 @@ function Clicar($Janela, [string[]]$Ids) {
 }
 
 function Texto($Janela, [string]$Id) {
+    # Caixa de texto de várias linhas: TextPattern; uma linha: ValuePattern; TextBlock: Name
     $e = Achar $Janela $Id
     if (-not $e) { return $null }
-    try { return $e.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value } catch { return $e.Current.Name }
+    $padroes = $e.GetSupportedPatterns()
+    if ($padroes -contains [System.Windows.Automation.TextPattern]::Pattern) {
+        return $e.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern).DocumentRange.GetText(-1)
+    }
+    if ($padroes -contains [System.Windows.Automation.ValuePattern]::Pattern) {
+        return $e.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value
+    }
+    return $e.Current.Name
 }
 
 function Esperar-Texto($Janela, [string]$Id, [scriptblock]$Condicao, [int]$Seg = 60) {
@@ -195,6 +203,7 @@ try {
     Write-Output '4) Analisar'
     Clicar $w 'BtnAnalisar'
     Confere 'análise mostrou o total' ([bool](Esperar-Texto $w 'TxtLog' { param($t) $t -match 'Total:' }))
+    Confere 'caixa de registro visível (altura de pelo menos 60 px)' ((Achar $w 'TxtLog').Current.BoundingRectangle.Height -ge 60)
     Capturar $w '08-analise'
 
     Write-Output '5) Otimizar'
