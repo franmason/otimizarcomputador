@@ -1,14 +1,14 @@
 ﻿#requires -Version 5.1
 <#
-    Otimizador de PC - MVP
-    ----------------------
+    Otimizador de PC
+    ----------------
     Faz SOMENTE ações seguras, sem exigir administrador:
       1. Limpa %TEMP% (arquivos com mais de 1 dia)
       2. Limpa C:\Windows\Temp (mesma regra; o que não tiver permissão é pulado)
       3. Limpa o cache do Chrome e do Edge (Cache, Code Cache e GPUCache dos perfis
          Default e "Profile *"), pulando o navegador se ele estiver aberto
       4. ipconfig /flushdns
-      5. Diagnóstico somente leitura
+      5. Diagnóstico, nota de saúde e status do sistema (somente leitura)
       6. Abre o Gerenciador de Tarefas na aba Inicialização (não desativa nada sozinho)
 
     Não mexe em registro, serviços, plano de energia, efeitos visuais ou políticas.
@@ -24,15 +24,22 @@
     "Instalação"). Instala só para o usuário atual, sem administrador. A única
     escrita no registro é a entrada do próprio app em "Programas e Recursos"
     (HKCU), removida ao desinstalar.
+
+    Interface: WPF (o layout está em XAML na seção "Interface"). Tarefas demoradas
+    rodam em segundo plano (Iniciar-EmSegundoPlano) para a janela não travar.
 #>
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName PresentationFramework
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName WindowsBase
 
 # ------------------------------------------------------------------ Configuração
 
 $script:NomeApp          = 'Otimizador de PC'
-$script:Versao           = '1.0.0'
+$script:Versao           = '1.1.0'
+$script:NotasVersao     = ''   # preenchido pelo Gerar-EXE.ps1 com a seção desta versão do NOVIDADES.md
 $script:PastaInstalacao  = Join-Path $env:LOCALAPPDATA 'Programs\OtimizadorPC'
 $script:ExeInstalado     = Join-Path $script:PastaInstalacao 'Otimizador.exe'
 $script:ChaveDesinstalar = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\OtimizadorPC'
@@ -44,10 +51,16 @@ $script:UrlReleases      = "https://github.com/$($script:RepoGitHub)/releases"
 
 $script:PastaApp      = Join-Path $env:LOCALAPPDATA 'OtimizadorPC'
 $script:PastaBackup   = Join-Path $script:PastaApp 'Backup'
+$script:PastaDownload = Join-Path $script:PastaApp 'Atualizacao'
+$script:ArquivoHistorico = Join-Path $script:PastaApp 'historico.json'
+$script:ArquivoConfig    = Join-Path $script:PastaApp 'config.json'
 $script:DiasBackup    = 7
 $script:PastasCache   = @('Cache', 'Code Cache', 'GPUCache')
 $script:FolhasAceitas = @('Temp', 'Tmp', 'Cache', 'Code Cache', 'GPUCache')
-$script:txtLog        = $null
+
+# Fila de mensagens do registro: pode receber linhas de qualquer thread;
+# a janela mostra o que chegar (ver Processar-Tarefas).
+$script:FilaLog = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
 
 # ------------------------------------------------------------------ Utilitários
 
@@ -58,17 +71,9 @@ function Formatar-Tamanho {
     return '{0:N0} KB' -f ($Bytes / 1KB)
 }
 
-function Manter-Responsivo {
-    # Deixa a janela redesenhar durante operações longas.
-    if ($script:txtLog) { [System.Windows.Forms.Application]::DoEvents() }
-}
-
 function Escrever-Log {
     param([string]$Texto)
-    if ($script:txtLog) {
-        $script:txtLog.AppendText(('[{0:HH:mm:ss}] {1}' -f (Get-Date), $Texto) + "`r`n")
-        Manter-Responsivo
-    }
+    if ($script:FilaLog) { [void]$script:FilaLog.Add(('[{0:HH:mm:ss}] {1}' -f (Get-Date), $Texto)) }
 }
 
 function Test-PontoDeReanalise {
@@ -89,6 +94,13 @@ function Test-PastaPermitida {
     try { $completo = [System.IO.Path]::GetFullPath($Caminho).TrimEnd('\') } catch { return $false }
     if ($completo.Length -le 3) { return $false }
     return ($script:FolhasAceitas -contains [System.IO.Path]::GetFileName($completo))
+}
+
+function Formatar-Quando {
+    param([datetime]$Data)
+    if ($Data.Date -eq (Get-Date).Date) { return 'Hoje, {0:HH:mm}' -f $Data }
+    if ($Data.Date -eq (Get-Date).Date.AddDays(-1)) { return 'Ontem, {0:HH:mm}' -f $Data }
+    return '{0:dd/MM/yyyy HH:mm}' -f $Data
 }
 
 # ------------------------------------------------------------------ Limpeza
@@ -117,7 +129,6 @@ function Obter-ArquivosElegiveis {
             if ($item -is [System.IO.DirectoryInfo]) { $pilha.Push($item) }
             elseif ($item.LastWriteTime -lt $limite) { $resultado.Add($item) }
         }
-        Manter-Responsivo
     }
     return ,$resultado
 }
@@ -146,7 +157,6 @@ function Limpar-Pasta {
     $escritor = New-Object System.IO.StreamWriter($manifesto, $true, (New-Object System.Text.UTF8Encoding($false)))
     $escritor.AutoFlush = $true
     try {
-        $i = 0
         foreach ($arquivo in $arquivos) {
             try {
                 $tamanho = $arquivo.Length
@@ -158,7 +168,6 @@ function Limpar-Pasta {
             } catch {
                 $r.Pulados++
             }
-            if ((++$i % 200) -eq 0) { Manter-Responsivo }
         }
     } finally {
         $escritor.Dispose()
@@ -204,7 +213,6 @@ function Restaurar-Backup {
     if (-not [System.IO.File]::Exists($manifesto)) { return $r }
 
     $restantes = New-Object 'System.Collections.Generic.List[string]'
-    $i = 0
     foreach ($linha in [System.IO.File]::ReadAllLines($manifesto, [System.Text.Encoding]::UTF8)) {
         $partes = $linha -split "`t", 2
         if ($partes.Count -ne 2) { continue }
@@ -228,7 +236,6 @@ function Restaurar-Backup {
         } catch {
             $restantes.Add($linha); $r.Falhas++
         }
-        if ((++$i % 200) -eq 0) { Manter-Responsivo }
     }
 
     if ($restantes.Count -eq 0) {
@@ -287,43 +294,47 @@ function Limpar-DNS {
 }
 
 # ------------------------------------------------------------------ Ações
+# Só dados (nada de scriptblocks), para poderem ser usados nas tarefas em segundo plano.
 
 $script:Acoes = @(
     [pscustomobject]@{
-        Id = 'TempUsuario'; Tipo = 'Pasta'; Nome = 'Temporários do usuário'
+        Id = 'TempUsuario'; Tipo = 'Pasta'; Nome = 'Temporários do usuário'; Icone = [char]0xE74D; Cor = '#2563EB'
         Titulo = 'Limpar arquivos temporários do usuário (%TEMP%)'
         Descricao = 'Só arquivos com mais de 1 dia. Arquivos em uso são pulados.'
-        Dias = 1; Processo = $null; Pastas = { , @($env:TEMP) }
+        Dias = 1; Processo = $null; Caminho = $env:TEMP; DadosUsuario = $null
     }
     [pscustomobject]@{
-        Id = 'TempWindows'; Tipo = 'Pasta'; Nome = 'Temporários do Windows'
+        Id = 'TempWindows'; Tipo = 'Pasta'; Nome = 'Temporários do Windows'; Icone = [char]0xE8B7; Cor = '#7C3AED'
         Titulo = 'Limpar temporários do Windows (C:\Windows\Temp)'
         Descricao = 'Só arquivos com mais de 1 dia. O que não tiver permissão é pulado.'
-        Dias = 1; Processo = $null; Pastas = { , @(Join-Path $env:windir 'Temp') }
+        Dias = 1; Processo = $null; Caminho = (Join-Path $env:windir 'Temp'); DadosUsuario = $null
     }
     [pscustomobject]@{
-        Id = 'Chrome'; Tipo = 'Pasta'; Nome = 'Google Chrome'
+        Id = 'Chrome'; Tipo = 'Pasta'; Nome = 'Google Chrome'; Icone = [char]0xE774; Cor = '#EA4335'
         Titulo = 'Limpar cache do Google Chrome'
         Descricao = 'Só arquivos guardados de sites. Histórico, senhas, cookies e favoritos não são tocados. Pulado se estiver aberto.'
-        Dias = 0; Processo = 'chrome'; Pastas = { Obter-PastasCache (Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data') }
+        Dias = 0; Processo = 'chrome'; Caminho = $null; DadosUsuario = (Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data')
     }
     [pscustomobject]@{
-        Id = 'Edge'; Tipo = 'Pasta'; Nome = 'Microsoft Edge'
+        Id = 'Edge'; Tipo = 'Pasta'; Nome = 'Microsoft Edge'; Icone = [char]0xE909; Cor = '#0EA5E9'
         Titulo = 'Limpar cache do Microsoft Edge'
         Descricao = 'Mesma regra do Chrome. Pulado se o Edge estiver aberto.'
-        Dias = 0; Processo = 'msedge'; Pastas = { Obter-PastasCache (Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data') }
+        Dias = 0; Processo = 'msedge'; Caminho = $null; DadosUsuario = (Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data')
     }
     [pscustomobject]@{
-        Id = 'DNS'; Tipo = 'DNS'; Nome = 'Cache de DNS'
+        Id = 'DNS'; Tipo = 'DNS'; Nome = 'Cache de DNS'; Icone = [char]0xE839; Cor = '#0F766E'
         Titulo = 'Limpar cache de DNS (ipconfig /flushdns)'
         Descricao = 'Ajuda quando um site não abre. O Windows recria o cache sozinho, não precisa desfazer.'
-        Dias = 0; Processo = $null; Pastas = { , @() }
+        Dias = 0; Processo = $null; Caminho = $null; DadosUsuario = $null
     }
 )
 
 function Obter-PastasDaAcao {
     param($Acao)
-    return @(& $Acao.Pastas | Where-Object { Test-PastaPermitida $_ })
+    $pastas = @()
+    if ($Acao.Caminho) { $pastas += $Acao.Caminho }
+    if ($Acao.DadosUsuario) { $pastas += Obter-PastasCache $Acao.DadosUsuario }
+    return @($pastas | Where-Object { Test-PastaPermitida $_ })
 }
 
 function Analisar-Acao {
@@ -355,21 +366,23 @@ function Analisar-Acao {
 
 function Executar-Acao {
     param($Acao)
+    $res = [pscustomobject]@{ Acao = $Acao; Texto = ''; Arquivos = 0; Bytes = [long]0; Pulados = 0 }
     if ($Acao.Tipo -eq 'DNS') {
-        if (Limpar-DNS) { return 'cache de DNS limpo.' }
-        return 'não foi possível limpar o cache de DNS.'
+        $res.Texto = if (Limpar-DNS) { 'cache de DNS limpo.' } else { 'não foi possível limpar o cache de DNS.' }
+        return $res
     }
     if ($Acao.Processo -and (Test-ProcessoAberto $Acao.Processo)) {
-        return "pulado: o $($Acao.Nome) está aberto."
+        $res.Texto = "pulado: o $($Acao.Nome) está aberto."
+        return $res
     }
-    $movidos = 0; $bytes = [long]0; $pulados = 0
     foreach ($p in (Obter-PastasDaAcao $Acao)) {
         $r = Limpar-Pasta -Caminho $p -DiasMinimos $Acao.Dias -PastaBackup $script:PastaBackup
-        $movidos += $r.Movidos; $bytes += $r.Bytes; $pulados += $r.Pulados
+        $res.Arquivos += $r.Movidos; $res.Bytes += $r.Bytes; $res.Pulados += $r.Pulados
     }
-    $texto = '{0:N0} arquivo(s) limpos ({1})' -f $movidos, (Formatar-Tamanho $bytes)
-    if ($pulados -gt 0) { $texto += ', {0:N0} pulados (em uso ou sem permissão)' -f $pulados }
-    return $texto + '.'
+    $res.Texto = '{0:N0} arquivo(s) limpos ({1})' -f $res.Arquivos, (Formatar-Tamanho $res.Bytes)
+    if ($res.Pulados -gt 0) { $res.Texto += ', {0:N0} pulados (em uso ou sem permissão)' -f $res.Pulados }
+    $res.Texto += '.'
+    return $res
 }
 
 function Obter-PrefixosNavegadoresAbertos {
@@ -382,33 +395,47 @@ function Obter-PrefixosNavegadoresAbertos {
     return $prefixos
 }
 
-# ------------------------------------------------------------------ Diagnóstico
+# ------------------------------------------------------------------ Diagnóstico e status (somente leitura)
+
+function Calcular-NotaSaude {
+    # Nota de 0 a 100: começa em 100 e perde pontos por cada problema encontrado.
+    param($Diag)
+    $nota = 100
+    if ($Diag.RamUsoPct -ge 90) { $nota -= 25 } elseif ($Diag.RamUsoPct -ge 80) { $nota -= 15 } elseif ($Diag.RamUsoPct -ge 70) { $nota -= 5 }
+    if ($Diag.RamTotalGB -gt 0 -and $Diag.RamTotalGB -le 4.5) { $nota -= 20 } elseif ($Diag.RamTotalGB -gt 0 -and $Diag.RamTotalGB -le 8.5) { $nota -= 10 }
+    if ($Diag.TemHDD) { $nota -= 20 }
+    if ($Diag.CLivrePct -ge 0) {
+        if ($Diag.CLivrePct -lt 8) { $nota -= 25 } elseif ($Diag.CLivrePct -lt 15) { $nota -= 15 } elseif ($Diag.CLivrePct -lt 25) { $nota -= 5 }
+    }
+    return [math]::Max(0, [math]::Min(100, $nota))
+}
 
 function Obter-Diagnostico {
-    # Somente leitura.
-    $l = New-Object 'System.Collections.Generic.List[string]'
-    $rec = New-Object 'System.Collections.Generic.List[string]'
-
+    $d = [pscustomobject]@{
+        Modelo = ''; Processador = ''; RamTotalGB = 0; RamUsoPct = 0; TemHDD = $false; CLivrePct = -1
+        Linhas = (New-Object 'System.Collections.Generic.List[string]')
+        Dicas  = (New-Object 'System.Collections.Generic.List[string]')
+        Nota = 0
+    }
+    $l = $d.Linhas
     $cs = $null; $csp = $null; $os = $null; $cpu = $null
     try { $cs  = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop } catch { }
     try { $csp = Get-CimInstance Win32_ComputerSystemProduct -ErrorAction Stop } catch { }
     try { $os  = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop } catch { }
     try { $cpu = Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1 } catch { }
 
-    $l.Add('===== DIAGNÓSTICO (somente leitura) =====')
     if ($cs) {
-        $modelo = "$($cs.Manufacturer) $($cs.Model)"
-        if ($csp -and $csp.Version -and $cs.Manufacturer -match 'Lenovo') { $modelo = "$($cs.Manufacturer) $($csp.Version) ($($cs.Model))" }
-        $l.Add("Modelo: $modelo")
+        $d.Modelo = "$($cs.Manufacturer) $($cs.Model)"
+        if ($csp -and $csp.Version -and $cs.Manufacturer -match 'Lenovo') { $d.Modelo = "$($cs.Manufacturer) $($csp.Version) ($($cs.Model))" }
+        $l.Add("Modelo:       $($d.Modelo)")
     }
-    if ($cpu) { $l.Add("Processador: $($cpu.Name.Trim())") }
+    if ($cpu) { $d.Processador = $cpu.Name.Trim(); $l.Add("Processador:  $($d.Processador)") }
 
-    $totalGB = 0
     if ($os) {
-        $totalGB = $os.TotalVisibleMemorySize / 1MB
-        $usoPct = [math]::Round(100 * (1 - $os.FreePhysicalMemory / $os.TotalVisibleMemorySize))
-        $l.Add(('Memória RAM: {0:N1} GB, em uso: {1}%' -f $totalGB, $usoPct))
-        if ($usoPct -ge 80) { $rec.Add("Uso de memória alto ($usoPct%). Feche abas e programas que não estiver usando.") }
+        $d.RamTotalGB = [math]::Round($os.TotalVisibleMemorySize / 1MB, 1)
+        $d.RamUsoPct = [math]::Round(100 * (1 - $os.FreePhysicalMemory / $os.TotalVisibleMemorySize))
+        $l.Add(('Memória RAM:  {0:N1} GB, em uso: {1}%' -f $d.RamTotalGB, $d.RamUsoPct))
+        if ($d.RamUsoPct -ge 80) { $d.Dicas.Add("Uso de memória alto ($($d.RamUsoPct)%). Feche abas e programas que não estiver usando.") }
     }
 
     try {
@@ -421,28 +448,30 @@ function Obter-Diagnostico {
         if ($slots) {
             $livres = [math]::Max(0, $slots - $pentes.Count)
             $l.Add("  Slots: $slots no total, $livres livre(s)")
-            if ($totalGB -gt 0 -and $totalGB -le 8.5) {
-                if ($livres -gt 0) { $rec.Add("Há $livres slot(s) de memória livre(s): adicionar um pente (ex.: +8 GB) deixaria o PC bem mais folgado.") }
-                else { $rec.Add('Não há slot de memória livre: para ter mais RAM seria preciso trocar um pente por outro maior.') }
+            if ($d.RamTotalGB -gt 0 -and $d.RamTotalGB -le 8.5) {
+                if ($livres -gt 0) { $d.Dicas.Add("Há $livres slot(s) de memória livre(s): adicionar um pente (ex.: +8 GB) deixaria o PC bem mais folgado.") }
+                else { $d.Dicas.Add('Não há slot de memória livre: para ter mais RAM seria preciso trocar um pente por outro maior.') }
             }
         }
     } catch { $l.Add('  Pentes de memória: não foi possível ler.') }
 
     try {
-        $discos = @(Get-PhysicalDisk -ErrorAction Stop)
-        foreach ($d in $discos) {
-            $tipo = [string]$d.MediaType
-            if ($tipo -notin @('SSD', 'HDD')) { $tipo = if ($d.SpindleSpeed -eq 0) { 'SSD (provável)' } else { 'desconhecido' } }
-            $l.Add(('Disco: {0} - {1}, {2}' -f $d.FriendlyName, $tipo, (Formatar-Tamanho $d.Size)))
-            if ($tipo -eq 'HDD') { $rec.Add("O disco '$($d.FriendlyName)' é HDD. Trocar por SSD é a melhoria que mais acelera o PC.") }
+        foreach ($disco in @(Get-PhysicalDisk -ErrorAction Stop)) {
+            $tipo = [string]$disco.MediaType
+            if ($tipo -notin @('SSD', 'HDD')) { $tipo = if ($disco.SpindleSpeed -eq 0) { 'SSD (provável)' } else { 'desconhecido' } }
+            $l.Add(('Disco:        {0} - {1}, {2}' -f $disco.FriendlyName, $tipo, (Formatar-Tamanho $disco.Size)))
+            if ($tipo -eq 'HDD') {
+                $d.TemHDD = $true
+                $d.Dicas.Add("O disco '$($disco.FriendlyName)' é HDD. Trocar por SSD é a melhoria que mais acelera o PC.")
+            }
         }
-    } catch { $l.Add('Disco: não foi possível identificar o tipo.') }
+    } catch { $l.Add('Disco:        não foi possível identificar o tipo.') }
 
     try {
         $c = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction Stop
-        $pct = [math]::Round(100 * $c.FreeSpace / $c.Size)
-        $l.Add(('Espaço livre no C: {0} de {1} ({2}%)' -f (Formatar-Tamanho $c.FreeSpace), (Formatar-Tamanho $c.Size), $pct))
-        if ($pct -lt 15 -or $c.FreeSpace -lt 20GB) { $rec.Add('Pouco espaço livre no C:. Remova programas e arquivos grandes que não usa (o Otimizador não apaga arquivos pessoais).') }
+        $d.CLivrePct = [math]::Round(100 * $c.FreeSpace / $c.Size)
+        $l.Add(('Espaço no C:  {0} livres de {1} ({2}%)' -f (Formatar-Tamanho $c.FreeSpace), (Formatar-Tamanho $c.Size), $d.CLivrePct))
+        if ($d.CLivrePct -lt 15 -or $c.FreeSpace -lt 20GB) { $d.Dicas.Add('Pouco espaço livre no C:. Remova programas e arquivos grandes que não usa (o Otimizador não apaga arquivos pessoais).') }
     } catch { }
 
     $l.Add('')
@@ -455,105 +484,994 @@ function Obter-Diagnostico {
         $l.Add(('  {0}{1}: {2}' -f $g.Nome, $qtd, (Formatar-Tamanho $g.Bytes)))
     }
     $chrome = $grupos | Where-Object { $_.Nome -eq 'chrome' }
-    if ($chrome -and $chrome.Bytes -gt 1.5GB) { $rec.Add('O Chrome está usando muita memória. Feche abas que não estiver usando.') }
+    if ($chrome -and $chrome.Bytes -gt 1.5GB) { $d.Dicas.Add('O Chrome está usando muita memória. Feche abas que não estiver usando.') }
 
-    $l.Add('')
-    $l.Add('Recomendações:')
-    if ($rec.Count -eq 0) { $rec.Add('Nenhum problema evidente encontrado.') }
-    foreach ($r in $rec) { $l.Add("  - $r") }
-    return $l
+    $d.Nota = Calcular-NotaSaude $d
+    if ($d.Dicas.Count -eq 0) { $d.Dicas.Add('Nenhum problema encontrado. Continue fazendo a limpeza de vez em quando.') }
+    return $d
 }
 
-# ------------------------------------------------------------------ Interface
-# Os controles ficam em $script:UI para que os eventos (que rodam depois que
-# Criar-Interface termina) consigam acessá-los.
+function Obter-StatusSistema {
+    $s = [pscustomobject]@{ Cpu = -1; Memoria = -1; DiscoLivre = -1; Rede = $false }
+    try { $s.Cpu = [int](Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'" -ErrorAction Stop).PercentProcessorTime } catch { }
+    try {
+        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+        $s.Memoria = [int][math]::Round(100 * (1 - $os.FreePhysicalMemory / $os.TotalVisibleMemorySize))
+    } catch { }
+    try {
+        $c = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction Stop
+        $s.DiscoLivre = [int][math]::Round(100 * $c.FreeSpace / $c.Size)
+    } catch { }
+    try { $s.Rede = [System.Net.NetworkInformation.NetworkInterface]::GetIsNetworkAvailable() } catch { }
+    return $s
+}
+
+# ------------------------------------------------------------------ Histórico e configurações
+
+function Ler-Json {
+    param([string]$Caminho)
+    if (-not [System.IO.File]::Exists($Caminho)) { return $null }
+    try { return ([System.IO.File]::ReadAllText($Caminho, [System.Text.Encoding]::UTF8) | ConvertFrom-Json) } catch { return $null }
+}
+
+function Salvar-Json {
+    param([string]$Caminho, $Objeto)
+    [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($Caminho))
+    [System.IO.File]::WriteAllText($Caminho, (ConvertTo-Json -InputObject $Objeto -Depth 4), (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Ler-Historico {
+    $h = Ler-Json $script:ArquivoHistorico
+    if (-not $h) { return @() }
+    return @($h)
+}
+
+function Adicionar-Historico {
+    param([string]$Tipo, [string]$Descricao, [int]$Arquivos = 0, [long]$Bytes = 0)
+    $lista = New-Object System.Collections.ArrayList
+    foreach ($item in (Ler-Historico)) { [void]$lista.Add($item) }
+    [void]$lista.Insert(0, [pscustomobject]@{ Data = (Get-Date).ToString('o'); Tipo = $Tipo; Descricao = $Descricao; Arquivos = $Arquivos; Bytes = $Bytes })
+    while ($lista.Count -gt 100) { $lista.RemoveAt($lista.Count - 1) }
+    Salvar-Json $script:ArquivoHistorico @($lista)
+}
+
+function Ler-Config {
+    $c = Ler-Json $script:ArquivoConfig
+    $config = [pscustomobject]@{ AcoesPadrao = @($script:Acoes | ForEach-Object { $_.Id }); VerificarAtualizacoes = $true }
+    if ($c) {
+        if ($null -ne $c.AcoesPadrao) { $config.AcoesPadrao = @($c.AcoesPadrao) }
+        if ($null -ne $c.VerificarAtualizacoes) { $config.VerificarAtualizacoes = [bool]$c.VerificarAtualizacoes }
+    }
+    return $config
+}
+
+function Salvar-Config {
+    param($Config)
+    Salvar-Json $script:ArquivoConfig $Config
+}
+
+# ------------------------------------------------------------------ Tarefas em segundo plano
+# Cada tarefa roda num runspace separado, com cópias das funções e variáveis de que
+# precisa. Um timer da janela confere as tarefas prontas e chama o AoConcluir na
+# thread da janela, que é a única que pode mexer na interface.
+
+$script:Tarefas = New-Object System.Collections.ArrayList
+$script:FuncoesSegundoPlano = @(
+    'Formatar-Tamanho', 'Escrever-Log', 'Test-PontoDeReanalise', 'Test-ProcessoAberto', 'Test-PastaPermitida',
+    'Obter-ArquivosElegiveis', 'Limpar-Pasta', 'Remover-PastaSegura', 'Restaurar-Backup', 'Obter-InfoBackup',
+    'Obter-PastasCache', 'Limpar-DNS', 'Obter-PastasDaAcao', 'Analisar-Acao', 'Executar-Acao',
+    'Calcular-NotaSaude', 'Obter-Diagnostico', 'Obter-StatusSistema'
+)
+$script:VariaveisSegundoPlano = @('Acoes', 'PastaApp', 'PastaBackup', 'PastasCache', 'FolhasAceitas', 'FilaLog')
+
+function Obter-PoolSegundoPlano {
+    # Um pool de runspaces criado uma vez e reaproveitado (o status roda a cada 3 s).
+    if ($script:Pool) { return $script:Pool }
+    $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    foreach ($nome in $script:FuncoesSegundoPlano) {
+        $definicao = (Get-Item "function:$nome").ScriptBlock.ToString()
+        $iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry($nome, $definicao)))
+    }
+    foreach ($nome in $script:VariaveisSegundoPlano) {
+        $valor = (Get-Variable -Scope Script -Name $nome).Value
+        $iss.Variables.Add((New-Object System.Management.Automation.Runspaces.SessionStateVariableEntry($nome, $valor, '')))
+    }
+    $script:Pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, 3, $iss, $Host)
+    $script:Pool.Open()
+    return $script:Pool
+}
+
+function Iniciar-EmSegundoPlano {
+    param([scriptblock]$Trabalho, [hashtable]$Parametros = @{}, [scriptblock]$AoConcluir)
+    $ps = [powershell]::Create()
+    $ps.RunspacePool = Obter-PoolSegundoPlano
+    [void]$ps.AddScript($Trabalho.ToString())
+    foreach ($chave in $Parametros.Keys) { [void]$ps.AddParameter($chave, $Parametros[$chave]) }
+    [void]$script:Tarefas.Add(@{ PS = $ps; Handle = $ps.BeginInvoke(); AoConcluir = $AoConcluir })
+}
+
+function Processar-Tarefas {
+    for ($i = $script:Tarefas.Count - 1; $i -ge 0; $i--) {
+        $t = $script:Tarefas[$i]
+        if (-not $t.Handle.IsCompleted) { continue }
+        $script:Tarefas.RemoveAt($i)
+        $resultado = $null; $erro = $null
+        try { $resultado = $t.PS.EndInvoke($t.Handle) } catch { $erro = $_.Exception.Message }
+        # Erro do fluxo só conta quando a tarefa não devolveu nada (avisos isolados não descartam o resultado)
+        if (-not $erro -and -not $resultado -and $t.PS.Streams.Error.Count -gt 0) { $erro = [string]$t.PS.Streams.Error[0] }
+        $t.PS.Dispose()
+        if ($t.AoConcluir) {
+            try { & $t.AoConcluir $resultado $erro } catch { Escrever-Log "Erro interno: $($_.Exception.Message)" }
+        }
+    }
+
+    if ($script:FilaLog.Count -gt 0 -and $script:UI.TxtLog) {
+        [System.Threading.Monitor]::Enter($script:FilaLog.SyncRoot)
+        try { $linhas = $script:FilaLog.ToArray(); $script:FilaLog.Clear() } finally { [System.Threading.Monitor]::Exit($script:FilaLog.SyncRoot) }
+        $script:UI.TxtLog.AppendText(($linhas -join "`r`n") + "`r`n")
+        $script:UI.TxtLog.ScrollToEnd()
+    }
+}
+
+# ------------------------------------------------------------------ Interface (WPF)
 
 $script:UI = @{}
 
+$script:Xaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Otimizador de PC" Width="1060" Height="700" WindowStartupLocation="CenterScreen"
+        WindowStyle="None" ResizeMode="CanMinimize" Background="#0A101C" Foreground="#E6EDF7"
+        FontFamily="Segoe UI" FontSize="13" UseLayoutRounding="True" TextOptions.TextFormattingMode="Display">
+  <Window.Resources>
+    <SolidColorBrush x:Key="Cartao" Color="#111A2B"/>
+    <SolidColorBrush x:Key="Borda" Color="#1C2840"/>
+    <SolidColorBrush x:Key="Suave" Color="#8A97AD"/>
+
+    <Style x:Key="EstiloCartao" TargetType="Border">
+      <Setter Property="Background" Value="{StaticResource Cartao}"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Borda}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="12"/>
+      <Setter Property="Padding" Value="16"/>
+    </Style>
+
+    <Style x:Key="Icone" TargetType="TextBlock">
+      <Setter Property="FontFamily" Value="Segoe MDL2 Assets"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+    </Style>
+
+    <Style x:Key="Titulo" TargetType="TextBlock">
+      <Setter Property="FontSize" Value="15"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+    </Style>
+
+    <Style x:Key="TextoSuave" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="{StaticResource Suave}"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="TextWrapping" Value="Wrap"/>
+    </Style>
+
+    <Style x:Key="Botao" TargetType="Button">
+      <Setter Property="Foreground" Value="White"/>
+      <Setter Property="Background" Value="#1B2740"/>
+      <Setter Property="BorderBrush" Value="#2A3A5C"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding" Value="14,8"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Fundo" CornerRadius="10" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
+                    Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Fundo" Property="Opacity" Value="0.88"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="Fundo" Property="Opacity" Value="0.75"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Fundo" Property="Opacity" Value="0.4"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="BotaoPrincipal" TargetType="Button" BasedOn="{StaticResource Botao}">
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="FontSize" Value="15"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Height" Value="48"/>
+      <Setter Property="Background">
+        <Setter.Value>
+          <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+            <GradientStop Color="#22C55E" Offset="0"/>
+            <GradientStop Color="#16A34A" Offset="1"/>
+          </LinearGradientBrush>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="BotaoContorno" TargetType="Button" BasedOn="{StaticResource Botao}">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderBrush" Value="#2F4166"/>
+      <Setter Property="Height" Value="42"/>
+    </Style>
+
+    <Style x:Key="BotaoJanela" TargetType="Button" BasedOn="{StaticResource Botao}">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Width" Value="40"/>
+      <Setter Property="Height" Value="32"/>
+      <Setter Property="Padding" Value="0"/>
+      <Setter Property="Foreground" Value="#A9B4C7"/>
+    </Style>
+
+    <Style x:Key="Menu" TargetType="RadioButton">
+      <Setter Property="Foreground" Value="#A9B4C7"/>
+      <Setter Property="Margin" Value="0,2"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="GroupName" Value="Menu"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="RadioButton">
+            <Border x:Name="Fundo" CornerRadius="8" Background="Transparent" Padding="12,10">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="{TemplateBinding Tag}" FontFamily="Segoe MDL2 Assets" FontSize="16" Width="30" VerticalAlignment="Center"/>
+                <ContentPresenter VerticalAlignment="Center"/>
+              </StackPanel>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Fundo" Property="Background" Value="#141F35"/></Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="Fundo" Property="Background" Value="#1B2C4D"/>
+                <Setter Property="Foreground" Value="White"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="Interruptor" TargetType="CheckBox">
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="CheckBox">
+            <Border x:Name="Trilho" Width="44" Height="24" CornerRadius="12" Background="#2A3650">
+              <Ellipse x:Name="Bola" Width="18" Height="18" Fill="White" HorizontalAlignment="Left" Margin="3,0"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="Trilho" Property="Background" Value="#22C55E"/>
+                <Setter TargetName="Bola" Property="HorizontalAlignment" Value="Right"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Trilho" Property="Opacity" Value="0.5"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="Registro" TargetType="TextBox">
+      <Setter Property="Background" Value="#0B1322"/>
+      <Setter Property="Foreground" Value="#C9D4E5"/>
+      <Setter Property="BorderBrush" Value="{StaticResource Borda}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="FontFamily" Value="Consolas"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Padding" Value="8"/>
+      <Setter Property="IsReadOnly" Value="True"/>
+      <Setter Property="TextWrapping" Value="Wrap"/>
+      <Setter Property="VerticalScrollBarVisibility" Value="Auto"/>
+    </Style>
+  </Window.Resources>
+
+  <Border BorderBrush="#1C2840" BorderThickness="1">
+    <Grid>
+      <Grid.RowDefinitions>
+        <RowDefinition Height="48"/>
+        <RowDefinition Height="*"/>
+      </Grid.RowDefinitions>
+
+      <!-- Barra de título -->
+      <Grid x:Name="BarraTitulo" Grid.Row="0" Background="#0A101C">
+        <StackPanel Orientation="Horizontal" Margin="18,0,0,0" VerticalAlignment="Center">
+          <Border Width="28" Height="28" CornerRadius="8">
+            <Border.Background>
+              <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                <GradientStop Color="#3B82F6" Offset="0"/>
+                <GradientStop Color="#22C55E" Offset="1"/>
+              </LinearGradientBrush>
+            </Border.Background>
+            <TextBlock Text="&#xEC4A;" Style="{StaticResource Icone}" FontSize="15" Foreground="White" HorizontalAlignment="Center"/>
+          </Border>
+          <TextBlock Text="Otimizador de PC" FontSize="15" FontWeight="SemiBold" Margin="10,0,8,0" VerticalAlignment="Center"/>
+          <TextBlock x:Name="TxtVersao" Foreground="{StaticResource Suave}" FontSize="11" VerticalAlignment="Center"/>
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,8,0">
+          <Button x:Name="BtnAtualizar" Style="{StaticResource BotaoPrincipal}" Height="32" FontSize="12" Padding="14,0"
+                  Margin="0,0,12,0" Visibility="Collapsed">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="&#xE896;" Style="{StaticResource Icone}" Margin="0,0,8,0"/>
+              <TextBlock x:Name="TxtBtnAtualizar" Text="Atualizar"/>
+            </StackPanel>
+          </Button>
+          <Button x:Name="BtnMinimizar" Style="{StaticResource BotaoJanela}"><TextBlock Text="&#xE921;" Style="{StaticResource Icone}" FontSize="10"/></Button>
+          <Button x:Name="BtnFechar" Style="{StaticResource BotaoJanela}"><TextBlock Text="&#xE8BB;" Style="{StaticResource Icone}" FontSize="10"/></Button>
+        </StackPanel>
+      </Grid>
+
+      <Grid Grid.Row="1">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="214"/>
+          <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <!-- Menu lateral -->
+        <Border Grid.Column="0" Background="#0D1524" BorderBrush="#1C2840" BorderThickness="0,1,1,0">
+          <DockPanel Margin="12,14,12,14">
+            <Border DockPanel.Dock="Bottom" Style="{StaticResource EstiloCartao}" Padding="14">
+              <StackPanel>
+                <StackPanel Orientation="Horizontal">
+                  <Ellipse x:Name="PontoSaude" Width="9" Height="9" Fill="#22C55E" VerticalAlignment="Center"/>
+                  <TextBlock x:Name="TxtSaudeLateral" Text="Analisando o PC..." FontSize="12" FontWeight="SemiBold" Margin="8,0,0,0"/>
+                </StackPanel>
+                <TextBlock Style="{StaticResource TextoSuave}" FontSize="11" Margin="0,6,0,0"
+                           Text="Faça a limpeza de vez em quando para manter o PC leve."/>
+              </StackPanel>
+            </Border>
+            <StackPanel>
+              <RadioButton x:Name="NavInicio" Style="{StaticResource Menu}" Tag="&#xE80F;" Content="Início" IsChecked="True"/>
+              <RadioButton x:Name="NavDiagnostico" Style="{StaticResource Menu}" Tag="&#xE9D9;" Content="Diagnóstico"/>
+              <RadioButton x:Name="NavHistorico" Style="{StaticResource Menu}" Tag="&#xE81C;" Content="Histórico"/>
+              <RadioButton x:Name="NavInicializacao" Style="{StaticResource Menu}" Tag="&#xE7E8;" Content="Programas de inicialização"/>
+              <RadioButton x:Name="NavConfig" Style="{StaticResource Menu}" Tag="&#xE713;" Content="Configurações"/>
+            </StackPanel>
+          </DockPanel>
+        </Border>
+
+        <Grid Grid.Column="1" Margin="22,16,22,18">
+
+          <!-- Página: Início -->
+          <Grid x:Name="PaginaInicio">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="272"/>
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+
+            <StackPanel Grid.Row="0" Grid.Column="0" Margin="0,0,0,14">
+              <TextBlock Text="Olá! Vamos deixar seu PC" FontSize="25" FontWeight="Bold"/>
+              <TextBlock Text="mais rápido e leve?" FontSize="25" FontWeight="Bold" Foreground="#4F9BFF"/>
+              <TextBlock Style="{StaticResource TextoSuave}" FontSize="13" Margin="0,6,0,0"
+                         Text="Escolha o que limpar e clique em Otimizar. Tudo pode ser desfeito."/>
+            </StackPanel>
+
+            <Border Grid.Row="1" Grid.Column="0" Style="{StaticResource EstiloCartao}" Padding="14,14,14,6">
+              <StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="2,0,0,10">
+                  <TextBlock Text="&#xE945;" Style="{StaticResource Icone}" Foreground="#4F9BFF" FontSize="16" Margin="0,0,10,0"/>
+                  <StackPanel>
+                    <TextBlock Text="Ações de limpeza" Style="{StaticResource Titulo}"/>
+                    <TextBlock Text="Escolha o que deseja fazer e clique em &quot;Otimizar&quot;." Style="{StaticResource TextoSuave}"/>
+                  </StackPanel>
+                </StackPanel>
+                <StackPanel x:Name="ListaAcoes"/>
+              </StackPanel>
+            </Border>
+
+            <Border Grid.Row="2" Grid.Column="0" Style="{StaticResource EstiloCartao}" Margin="0,12,0,0" Padding="14,10,14,14">
+              <DockPanel>
+                <DockPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+                  <Button x:Name="BtnLimparLog" DockPanel.Dock="Right" Style="{StaticResource Botao}" Padding="10,4" FontSize="11" Content="Limpar registro"/>
+                  <TextBlock Text="Registro" Style="{StaticResource Titulo}" FontSize="13" VerticalAlignment="Center"/>
+                </DockPanel>
+                <TextBox x:Name="TxtLog" Style="{StaticResource Registro}"/>
+              </DockPanel>
+            </Border>
+
+            <StackPanel Grid.Row="0" Grid.RowSpan="3" Grid.Column="1" Margin="16,0,0,0">
+              <Border Style="{StaticResource EstiloCartao}">
+                <StackPanel>
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="84"/>
+                      <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Grid Width="84" Height="84">
+                      <Ellipse Stroke="#1F2C45" StrokeThickness="8" Margin="4"/>
+                      <Path x:Name="AnelInicio" Stroke="#22C55E" StrokeThickness="8" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                      <TextBlock x:Name="TxtNotaInicio" Text="--" FontSize="22" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Grid>
+                    <StackPanel Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center">
+                      <TextBlock Text="Saúde do PC" Style="{StaticResource TextoSuave}"/>
+                      <TextBlock x:Name="TxtEstado" Text="Pronto para otimizar" FontWeight="SemiBold" FontSize="14" TextWrapping="Wrap" Margin="0,2,0,0"/>
+                      <TextBlock x:Name="TxtSelecionadas" Style="{StaticResource TextoSuave}" Margin="0,2,0,0"/>
+                    </StackPanel>
+                  </Grid>
+                  <ProgressBar x:Name="BarraProgresso" Height="4" Margin="0,12,0,0" IsIndeterminate="True"
+                               Foreground="#22C55E" Background="#1F2C45" BorderThickness="0" Visibility="Collapsed"/>
+                  <Button x:Name="BtnOtimizar" Style="{StaticResource BotaoPrincipal}" Margin="0,14,0,0">
+                    <StackPanel Orientation="Horizontal">
+                      <TextBlock Text="&#xE768;" Style="{StaticResource Icone}" Margin="0,0,10,0"/>
+                      <TextBlock Text="Otimizar"/>
+                    </StackPanel>
+                  </Button>
+                  <Button x:Name="BtnAnalisar" Style="{StaticResource BotaoContorno}" Margin="0,10,0,0">
+                    <StackPanel Orientation="Horizontal">
+                      <TextBlock Text="&#xE721;" Style="{StaticResource Icone}" Margin="0,0,10,0"/>
+                      <TextBlock Text="Analisar (sem alterar nada)"/>
+                    </StackPanel>
+                  </Button>
+                </StackPanel>
+              </Border>
+
+              <Border Style="{StaticResource EstiloCartao}" Margin="0,12,0,0">
+                <StackPanel>
+                  <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                    <TextBlock Text="&#xE9D9;" Style="{StaticResource Icone}" Foreground="#4F9BFF" FontSize="15" Margin="0,0,10,0"/>
+                    <TextBlock Text="Status do sistema" Style="{StaticResource Titulo}" FontSize="14"/>
+                  </StackPanel>
+                  <StackPanel x:Name="ListaStatus"/>
+                </StackPanel>
+              </Border>
+
+              <Border Style="{StaticResource EstiloCartao}" Margin="0,12,0,0">
+                <StackPanel>
+                  <Button x:Name="BtnVerHistorico" Background="Transparent" BorderThickness="0" Padding="0" Cursor="Hand"
+                          HorizontalContentAlignment="Stretch">
+                    <Button.Template>
+                      <ControlTemplate TargetType="Button"><ContentPresenter/></ControlTemplate>
+                    </Button.Template>
+                    <DockPanel>
+                      <TextBlock DockPanel.Dock="Right" Text="&#xE76C;" Style="{StaticResource Icone}" Foreground="{StaticResource Suave}" FontSize="11"/>
+                      <TextBlock Text="&#xE945;" Style="{StaticResource Icone}" Foreground="#FACC15" FontSize="16" Margin="0,0,10,0"/>
+                      <StackPanel>
+                        <TextBlock Text="Última limpeza" FontWeight="SemiBold"/>
+                        <TextBlock x:Name="TxtUltimaLimpeza" Text="Nenhuma ainda" Style="{StaticResource TextoSuave}"/>
+                      </StackPanel>
+                    </DockPanel>
+                  </Button>
+                  <TextBlock x:Name="TxtBackup" Style="{StaticResource TextoSuave}" FontSize="11" Margin="0,10,0,0"/>
+                  <Grid Margin="0,8,0,0">
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="8"/>
+                      <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Button x:Name="BtnDesfazer" Grid.Column="0" Style="{StaticResource Botao}" Padding="6,7" FontSize="12"
+                            ToolTip="Devolve os arquivos da última limpeza (Ctrl+Z)">
+                      <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE7A7;" Style="{StaticResource Icone}" Margin="0,0,6,0"/>
+                        <TextBlock Text="Desfazer"/>
+                      </StackPanel>
+                    </Button>
+                    <Button x:Name="BtnEsvaziar" Grid.Column="2" Style="{StaticResource Botao}" Padding="6,7" FontSize="12"
+                            ToolTip="Apaga de vez o backup para liberar o espaço">
+                      <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE74D;" Style="{StaticResource Icone}" Margin="0,0,6,0"/>
+                        <TextBlock Text="Esvaziar backup"/>
+                      </StackPanel>
+                    </Button>
+                  </Grid>
+                </StackPanel>
+              </Border>
+            </StackPanel>
+          </Grid>
+
+          <!-- Página: Diagnóstico -->
+          <Grid x:Name="PaginaDiagnostico" Visibility="Collapsed">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <DockPanel Margin="0,0,0,14">
+              <Button x:Name="BtnAtualizarDiag" DockPanel.Dock="Right" Style="{StaticResource BotaoContorno}" Height="38" VerticalAlignment="Center">
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Text="&#xE72C;" Style="{StaticResource Icone}" Margin="0,0,8,0"/>
+                  <TextBlock Text="Analisar de novo"/>
+                </StackPanel>
+              </Button>
+              <StackPanel>
+                <TextBlock Text="Diagnóstico do PC" FontSize="24" FontWeight="Bold"/>
+                <TextBlock Style="{StaticResource TextoSuave}" FontSize="13" Text="Só leitura: nada é alterado."/>
+              </StackPanel>
+            </DockPanel>
+            <Grid Grid.Row="1">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="310"/>
+                <ColumnDefinition Width="*"/>
+              </Grid.ColumnDefinitions>
+              <Border Style="{StaticResource EstiloCartao}" Padding="20">
+                <StackPanel>
+                  <Grid Width="150" Height="150" HorizontalAlignment="Center">
+                    <Ellipse Stroke="#1F2C45" StrokeThickness="12" Margin="6"/>
+                    <Path x:Name="AnelDiag" Stroke="#22C55E" StrokeThickness="12" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                    <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                      <TextBlock x:Name="TxtNotaDiag" Text="--" FontSize="40" FontWeight="Bold" HorizontalAlignment="Center"/>
+                      <TextBlock Text="de 100" Style="{StaticResource TextoSuave}" HorizontalAlignment="Center"/>
+                    </StackPanel>
+                  </Grid>
+                  <TextBlock x:Name="TxtRotuloDiag" Text="Analisando..." FontSize="17" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,12,0,0"/>
+                  <TextBlock Text="Dicas" Style="{StaticResource Titulo}" FontSize="14" Margin="0,18,0,8"/>
+                  <StackPanel x:Name="ListaDicas"/>
+                </StackPanel>
+              </Border>
+              <Border Grid.Column="1" Style="{StaticResource EstiloCartao}" Margin="16,0,0,0">
+                <DockPanel>
+                  <TextBlock DockPanel.Dock="Top" Text="Detalhes" Style="{StaticResource Titulo}" FontSize="14" Margin="0,0,0,10"/>
+                  <TextBox x:Name="TxtDiagnostico" Style="{StaticResource Registro}" Text="Coletando informações..."/>
+                </DockPanel>
+              </Border>
+            </Grid>
+          </Grid>
+
+          <!-- Página: Histórico -->
+          <Grid x:Name="PaginaHistorico" Visibility="Collapsed">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <StackPanel Margin="0,0,0,14">
+              <TextBlock Text="Histórico" FontSize="24" FontWeight="Bold"/>
+              <TextBlock Style="{StaticResource TextoSuave}" FontSize="13" Text="As últimas limpezas feitas neste PC."/>
+            </StackPanel>
+            <Border Grid.Row="1" Style="{StaticResource EstiloCartao}">
+              <Grid>
+                <TextBlock x:Name="TxtHistoricoVazio" Text="Nenhuma limpeza feita ainda." Style="{StaticResource TextoSuave}"
+                           FontSize="13" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                  <StackPanel x:Name="ListaHistorico"/>
+                </ScrollViewer>
+              </Grid>
+            </Border>
+          </Grid>
+
+          <!-- Página: Programas de inicialização -->
+          <StackPanel x:Name="PaginaInicializacao" Visibility="Collapsed">
+            <TextBlock Text="Programas de inicialização" FontSize="24" FontWeight="Bold"/>
+            <TextBlock Style="{StaticResource TextoSuave}" FontSize="13" Margin="0,0,0,14"
+                       Text="Programas que abrem sozinhos junto com o Windows deixam o PC lento para ligar."/>
+            <Border Style="{StaticResource EstiloCartao}" Padding="20">
+              <StackPanel>
+                <TextBlock TextWrapping="Wrap" FontSize="13" LineHeight="21">
+                  O Otimizador não desativa nada sozinho. Ele abre o Gerenciador de Tarefas do Windows
+                  na aba de inicialização, onde você escolhe:
+                </TextBlock>
+                <TextBlock TextWrapping="Wrap" FontSize="13" LineHeight="21" Margin="0,10,0,0" Foreground="#C9D4E5">
+                  1. Clique no programa que não precisa abrir com o Windows.<LineBreak/>
+                  2. Clique em "Desabilitar". O programa continua instalado e abre normalmente quando você quiser.<LineBreak/>
+                  3. Para voltar atrás, clique nele de novo e em "Habilitar".
+                </TextBlock>
+                <TextBlock TextWrapping="Wrap" Style="{StaticResource TextoSuave}" FontSize="12" Margin="0,10,0,0"
+                           Text="Dica: na dúvida, não desative antivírus, drivers (áudio, vídeo, touchpad) nem programas da empresa."/>
+                <Button x:Name="BtnAbrirInicializacao" Style="{StaticResource BotaoPrincipal}" HorizontalAlignment="Left" Padding="22,0" Margin="0,18,0,0">
+                  <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="&#xE7E8;" Style="{StaticResource Icone}" Margin="0,0,10,0"/>
+                    <TextBlock Text="Abrir programas de inicialização"/>
+                  </StackPanel>
+                </Button>
+              </StackPanel>
+            </Border>
+          </StackPanel>
+
+          <!-- Página: Configurações -->
+          <ScrollViewer x:Name="PaginaConfig" Visibility="Collapsed" VerticalScrollBarVisibility="Auto">
+            <StackPanel>
+              <TextBlock Text="Configurações" FontSize="24" FontWeight="Bold"/>
+              <TextBlock Style="{StaticResource TextoSuave}" FontSize="13" Margin="0,0,0,14"
+                         Text="Preferências do Otimizador. Nada aqui muda configurações do Windows."/>
+              <Border Style="{StaticResource EstiloCartao}">
+                <StackPanel>
+                  <TextBlock Text="Ações marcadas ao abrir o app" Style="{StaticResource Titulo}" FontSize="14"/>
+                  <TextBlock Style="{StaticResource TextoSuave}" Margin="0,2,0,10" Text="As que ficarem ligadas aqui já vêm marcadas na tela inicial."/>
+                  <StackPanel x:Name="ListaConfigAcoes"/>
+                </StackPanel>
+              </Border>
+              <Border Style="{StaticResource EstiloCartao}" Margin="0,12,0,0">
+                <StackPanel>
+                  <TextBlock Text="Atualizações" Style="{StaticResource Titulo}" FontSize="14"/>
+                  <DockPanel Margin="0,10,0,0">
+                    <CheckBox x:Name="ChkVerificarAtualizacoes" DockPanel.Dock="Right" Style="{StaticResource Interruptor}"/>
+                    <StackPanel>
+                      <TextBlock Text="Procurar atualizações ao abrir" FontWeight="SemiBold"/>
+                      <TextBlock Style="{StaticResource TextoSuave}" Text="Quando houver versão nova, aparece o botão verde &quot;Atualizar&quot; no alto da janela."/>
+                    </StackPanel>
+                  </DockPanel>
+                  <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                    <Button x:Name="BtnProcurarAtualizacao" Style="{StaticResource BotaoContorno}" Height="38">
+                      <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE895;" Style="{StaticResource Icone}" Margin="0,0,8,0"/>
+                        <TextBlock Text="Procurar agora"/>
+                      </StackPanel>
+                    </Button>
+                    <TextBlock x:Name="TxtStatusAtualizacao" Style="{StaticResource TextoSuave}" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                  </StackPanel>
+                </StackPanel>
+              </Border>
+              <Border Style="{StaticResource EstiloCartao}" Margin="0,12,0,0">
+                <StackPanel>
+                  <TextBlock Text="Sobre" Style="{StaticResource Titulo}" FontSize="14"/>
+                  <TextBlock x:Name="TxtSobre" Style="{StaticResource TextoSuave}" FontSize="12" Margin="0,4,0,10"/>
+                  <Button x:Name="BtnNovidades" Style="{StaticResource BotaoContorno}" Height="38" HorizontalAlignment="Left">
+                    <StackPanel Orientation="Horizontal">
+                      <TextBlock Text="&#xE8A7;" Style="{StaticResource Icone}" Margin="0,0,8,0"/>
+                      <TextBlock Text="Ver novidades de todas as versões"/>
+                    </StackPanel>
+                  </Button>
+                </StackPanel>
+              </Border>
+            </StackPanel>
+          </ScrollViewer>
+        </Grid>
+      </Grid>
+    </Grid>
+  </Border>
+</Window>
+'@
+
+function Pincel {
+    param([string]$Cor)
+    return [System.Windows.Media.BrushConverter]::new().ConvertFromString($Cor)
+}
+
+function Espaco {
+    param([double]$Esquerda, [double]$Cima = $Esquerda, [double]$Direita = $Esquerda, [double]$Baixo = $Cima)
+    return New-Object System.Windows.Thickness($Esquerda, $Cima, $Direita, $Baixo)
+}
+
+function Novo-Texto {
+    param([string]$Texto, [double]$Tamanho = 13, [string]$Cor = $null, [string]$Peso = 'Normal', [string]$Fonte = $null)
+    $t = New-Object System.Windows.Controls.TextBlock
+    $t.Text = $Texto
+    $t.FontSize = $Tamanho
+    $t.FontWeight = [System.Windows.FontWeights]::$Peso
+    $t.TextWrapping = 'Wrap'
+    $t.VerticalAlignment = 'Center'
+    if ($Cor) { $t.Foreground = Pincel $Cor }
+    if ($Fonte) { $t.FontFamily = New-Object System.Windows.Media.FontFamily($Fonte) }
+    return $t
+}
+
+function Nova-LinhaInterruptor {
+    # Linha com ícone colorido, título, descrição e um interruptor (usada nas ações e nas configurações).
+    param($Acao, [bool]$Ligado, [bool]$Compacta = $false)
+    $borda = New-Object System.Windows.Controls.Border
+    $borda.Background = Pincel '#0F1828'
+    $borda.BorderBrush = Pincel '#1C2840'
+    $borda.BorderThickness = Espaco 1
+    $borda.CornerRadius = New-Object System.Windows.CornerRadius(10)
+    $borda.Padding = if ($Compacta) { Espaco 10 7 } else { Espaco 12 9 }
+    $borda.Margin = Espaco 0 0 0 8
+
+    $grade = New-Object System.Windows.Controls.Grid
+    foreach ($largura in '46', '*', 'Auto') {
+        $col = New-Object System.Windows.Controls.ColumnDefinition
+        $col.Width = [System.Windows.GridLengthConverter]::new().ConvertFromString($largura)
+        $grade.ColumnDefinitions.Add($col)
+    }
+
+    $circulo = New-Object System.Windows.Controls.Border
+    $circulo.Width = 34; $circulo.Height = 34; $circulo.CornerRadius = New-Object System.Windows.CornerRadius(17)
+    $circulo.Background = Pincel $Acao.Cor
+    $circulo.HorizontalAlignment = 'Left'
+    $icone = Novo-Texto ([string]$Acao.Icone) 15 '#FFFFFF' 'Normal' 'Segoe MDL2 Assets'
+    $icone.HorizontalAlignment = 'Center'
+    $circulo.Child = $icone
+    $grade.Children.Add($circulo) | Out-Null
+
+    $textos = New-Object System.Windows.Controls.StackPanel
+    $textos.VerticalAlignment = 'Center'
+    $textos.Children.Add((Novo-Texto $Acao.Titulo 13 $null 'SemiBold')) | Out-Null
+    if (-not $Compacta) {
+        $desc = Novo-Texto $Acao.Descricao 11.5 '#8A97AD'
+        $desc.Margin = Espaco 0 2 0 0
+        $textos.Children.Add($desc) | Out-Null
+    }
+    [System.Windows.Controls.Grid]::SetColumn($textos, 1)
+    $grade.Children.Add($textos) | Out-Null
+
+    $chave = New-Object System.Windows.Controls.CheckBox
+    $chave.Style = $script:UI.Janela.FindResource('Interruptor')
+    $chave.IsChecked = $Ligado
+    $chave.Margin = Espaco 12 0 0 0
+    [System.Windows.Automation.AutomationProperties]::SetName($chave, $Acao.Titulo)
+    [System.Windows.Controls.Grid]::SetColumn($chave, 2)
+    $grade.Children.Add($chave) | Out-Null
+
+    $borda.Child = $grade
+    return @{ Linha = $borda; Chave = $chave }
+}
+
+function Definir-Anel {
+    # Desenha o arco do anel de saúde (0 a 100) dentro de uma área quadrada de $Tamanho.
+    param($Caminho, [double]$Valor, [double]$Tamanho, [double]$Espessura)
+    # Mesmo raio do traço do círculo de fundo (Ellipse com margem de meia espessura)
+    $raio = $Tamanho / 2 - $Espessura
+    $centro = $Tamanho / 2
+    $v = [math]::Max(0.5, [math]::Min(99.9, $Valor))
+    $angulo = $v / 100 * 2 * [math]::PI
+    $figura = New-Object System.Windows.Media.PathFigure
+    $figura.StartPoint = New-Object System.Windows.Point($centro, ($centro - $raio))
+    $fim = New-Object System.Windows.Point(($centro + $raio * [math]::Sin($angulo)), ($centro - $raio * [math]::Cos($angulo)))
+    $arco = New-Object System.Windows.Media.ArcSegment($fim, (New-Object System.Windows.Size($raio, $raio)), 0, ($v -gt 50),
+        [System.Windows.Media.SweepDirection]::Clockwise, $true)
+    $figura.Segments.Add($arco)
+    $geometria = New-Object System.Windows.Media.PathGeometry
+    $geometria.Figures.Add($figura)
+    $Caminho.Data = $geometria
+}
+
+function Obter-CorNota {
+    param([int]$Nota)
+    if ($Nota -ge 80) { return @{ Cor = '#22C55E'; Rotulo = 'Bom' } }
+    if ($Nota -ge 60) { return @{ Cor = '#FACC15'; Rotulo = 'Regular' } }
+    return @{ Cor = '#EF4444'; Rotulo = 'Precisa de atenção' }
+}
+
 function Mostrar-Mensagem {
     param([string]$Texto, [string]$Titulo = 'Otimizador de PC', [string]$Botoes = 'OK', [string]$Icone = 'Information')
-    if ($script:UI.Form) {
-        return [System.Windows.Forms.MessageBox]::Show($script:UI.Form, $Texto, $Titulo, $Botoes, $Icone)
+    if ($script:UI.Janela -and $script:UI.Janela.IsVisible) {
+        return [string][System.Windows.MessageBox]::Show($script:UI.Janela, $Texto, $Titulo, $Botoes, $Icone)
     }
-    return [System.Windows.Forms.MessageBox]::Show($Texto, $Titulo, $Botoes, $Icone)
+    if ($script:UI.Form) {
+        return [string][System.Windows.Forms.MessageBox]::Show($script:UI.Form, $Texto, $Titulo, $Botoes, $Icone)
+    }
+    return [string][System.Windows.Forms.MessageBox]::Show($Texto, $Titulo, $Botoes, $Icone)
+}
+
+function Mostrar-Pagina {
+    param([string]$Nome)
+    foreach ($p in 'PaginaInicio', 'PaginaDiagnostico', 'PaginaHistorico', 'PaginaInicializacao', 'PaginaConfig') {
+        $script:UI[$p].Visibility = if ($p -eq $Nome) { 'Visible' } else { 'Collapsed' }
+    }
+    if ($Nome -eq 'PaginaHistorico') { Atualizar-Historico }
+}
+
+function Obter-Selecionadas {
+    return @($script:Acoes | Where-Object { $script:UI.Chaves[$_.Id].IsChecked })
+}
+
+function Atualizar-Selecionadas {
+    $n = (Obter-Selecionadas).Count
+    $script:UI.TxtSelecionadas.Text = if ($n -eq 1) { '1 ação selecionada' } else { "$n ações selecionadas" }
+}
+
+function Definir-Ocupado {
+    param([bool]$Sim, [string]$Texto = '')
+    $script:Ocupado = $Sim
+    foreach ($nome in 'BtnOtimizar', 'BtnAnalisar', 'BtnDesfazer', 'BtnEsvaziar', 'BtnAtualizar') { $script:UI[$nome].IsEnabled = -not $Sim }
+    foreach ($c in $script:UI.Chaves.Values) { $c.IsEnabled = -not $Sim }
+    $script:UI.BarraProgresso.Visibility = if ($Sim) { 'Visible' } else { 'Collapsed' }
+    $script:UI.TxtEstado.Text = if ($Sim) { $Texto } else { 'Pronto para otimizar' }
+    if (-not $Sim) { Atualizar-StatusBackup }
 }
 
 function Atualizar-StatusBackup {
     $info = Obter-InfoBackup
     if ($info) {
-        $script:UI.LblBackup.Text = 'Backup da última limpeza: {0:N0} arquivo(s), {1}, de {2:dd/MM/yyyy HH:mm}. Pode ser desfeito.' -f $info.Arquivos, (Formatar-Tamanho $info.Bytes), $info.Data
+        $script:UI.TxtBackup.Text = 'Backup: {0:N0} arquivo(s), {1}. Pode ser desfeito até {2:dd/MM}.' -f $info.Arquivos, (Formatar-Tamanho $info.Bytes), $info.Data.AddDays($script:DiasBackup)
     } else {
-        $script:UI.LblBackup.Text = 'Nenhum backup guardado (não há limpeza para desfazer).'
+        $script:UI.TxtBackup.Text = 'Nenhum backup guardado.'
     }
-    $script:UI.BtnDesfazer.Enabled = [bool]$info
-    $script:UI.BtnEsvaziar.Enabled = [bool]$info
-}
-
-function Definir-Ocupado {
-    param([bool]$Sim)
-    foreach ($b in $script:UI.Botoes) { $b.Enabled = -not $Sim }
-    foreach ($c in $script:UI.Caixas.Values) { $c.Enabled = -not $Sim }
-    $script:UI.Form.UseWaitCursor = $Sim
-    if (-not $Sim) { Atualizar-StatusBackup }
-    [System.Windows.Forms.Application]::DoEvents()
-}
-
-function Obter-Selecionadas {
-    return @($script:Acoes | Where-Object { $script:UI.Caixas[$_.Id].Checked })
-}
-
-function Obter-LinhasAnalise {
-    param($Acoes)
-    $linhas = @()
-    foreach ($acao in $Acoes) {
-        Escrever-Log "Analisando: $($acao.Nome)..."
-        $res = Analisar-Acao $acao
-        $linhas += "- $($acao.Nome): $($res.Mensagem)"
+    if (-not $script:Ocupado) {
+        $script:UI.BtnDesfazer.IsEnabled = [bool]$info
+        $script:UI.BtnEsvaziar.IsEnabled = [bool]$info
     }
-    return $linhas
+    $ultima = Ler-Historico | Where-Object { $_.Tipo -eq 'Otimizacao' } | Select-Object -First 1
+    if ($ultima) {
+        $script:UI.TxtUltimaLimpeza.Text = '{0} · {1} limpos' -f (Formatar-Quando ([datetime]$ultima.Data)), (Formatar-Tamanho $ultima.Bytes)
+    } else {
+        $script:UI.TxtUltimaLimpeza.Text = 'Nenhuma ainda'
+    }
 }
+
+function Atualizar-Historico {
+    $lista = $script:UI.ListaHistorico
+    $lista.Children.Clear()
+    $itens = Ler-Historico
+    $script:UI.TxtHistoricoVazio.Visibility = if ($itens.Count -eq 0) { 'Visible' } else { 'Collapsed' }
+    foreach ($item in $itens) {
+        $linha = New-Object System.Windows.Controls.DockPanel
+        $borda = New-Object System.Windows.Controls.Border
+        $borda.Background = Pincel '#0F1828'; $borda.BorderBrush = Pincel '#1C2840'; $borda.BorderThickness = Espaco 1
+        $borda.CornerRadius = New-Object System.Windows.CornerRadius(10); $borda.Padding = Espaco 12 10; $borda.Margin = Espaco 0 0 0 8
+
+        $icone = switch ($item.Tipo) { 'Otimizacao' { [char]0xE74D } 'Desfazer' { [char]0xE7A7 } default { [char]0xE74D } }
+        $cor   = switch ($item.Tipo) { 'Otimizacao' { '#22C55E' } 'Desfazer' { '#FACC15' } default { '#4F9BFF' } }
+        $ic = Novo-Texto ([string]$icone) 16 $cor 'Normal' 'Segoe MDL2 Assets'
+        $ic.Width = 32
+        [System.Windows.Controls.DockPanel]::SetDock($ic, 'Left')
+        $linha.Children.Add($ic) | Out-Null
+
+        if ($item.Bytes -gt 0) {
+            $tam = Novo-Texto (Formatar-Tamanho $item.Bytes) 13 $cor 'SemiBold'
+            [System.Windows.Controls.DockPanel]::SetDock($tam, 'Right')
+            $linha.Children.Add($tam) | Out-Null
+        }
+        $textos = New-Object System.Windows.Controls.StackPanel
+        $textos.Children.Add((Novo-Texto $item.Descricao 13 $null 'SemiBold')) | Out-Null
+        $textos.Children.Add((Novo-Texto (Formatar-Quando ([datetime]$item.Data)) 11.5 '#8A97AD')) | Out-Null
+        $linha.Children.Add($textos) | Out-Null
+
+        $borda.Child = $linha
+        $lista.Children.Add($borda) | Out-Null
+    }
+}
+
+function Atualizar-Saude {
+    param($Diag)
+    $cor = Obter-CorNota $Diag.Nota
+    foreach ($par in @(@('AnelInicio', 84, 8), @('AnelDiag', 150, 12))) {
+        Definir-Anel $script:UI[$par[0]] $Diag.Nota $par[1] $par[2]
+        $script:UI[$par[0]].Stroke = Pincel $cor.Cor
+    }
+    $script:UI.TxtNotaInicio.Text = [string]$Diag.Nota
+    $script:UI.TxtNotaDiag.Text = [string]$Diag.Nota
+    $script:UI.TxtRotuloDiag.Text = $cor.Rotulo
+    $script:UI.TxtRotuloDiag.Foreground = Pincel $cor.Cor
+    $script:UI.TxtSaudeLateral.Text = "Saúde do PC: $($Diag.Nota)/100 · $($cor.Rotulo)"
+    $script:UI.PontoSaude.Fill = Pincel $cor.Cor
+    $script:UI.TxtDiagnostico.Text = ($Diag.Linhas -join "`r`n")
+
+    $script:UI.ListaDicas.Children.Clear()
+    foreach ($dica in $Diag.Dicas) {
+        $linha = New-Object System.Windows.Controls.DockPanel
+        $linha.Margin = Espaco 0 0 0 8
+        $marca = Novo-Texto ([string][char]0xE73E) 11 $cor.Cor 'Normal' 'Segoe MDL2 Assets'
+        $marca.Width = 20; $marca.VerticalAlignment = 'Top'; $marca.Margin = Espaco 0 3 0 0
+        [System.Windows.Controls.DockPanel]::SetDock($marca, 'Left')
+        $linha.Children.Add($marca) | Out-Null
+        $linha.Children.Add((Novo-Texto $dica 12.5 '#C9D4E5')) | Out-Null
+        $script:UI.ListaDicas.Children.Add($linha) | Out-Null
+    }
+}
+
+function Iniciar-Diagnostico {
+    if ($script:DiagnosticoRodando) { return }
+    $script:DiagnosticoRodando = $true
+    $script:UI.TxtRotuloDiag.Text = 'Analisando...'
+    Iniciar-EmSegundoPlano -Trabalho { Obter-Diagnostico } -AoConcluir {
+        param($resultado, $erro)
+        $script:DiagnosticoRodando = $false
+        $diag = $resultado | Select-Object -First 1
+        if ($diag) { Atualizar-Saude $diag } else { $script:UI.TxtRotuloDiag.Text = 'Não foi possível analisar' }
+    }
+}
+
+# ---- Status do sistema
+
+$script:ItensStatus = @(
+    @{ Id = 'Cpu';     Nome = 'Processador'; Icone = [char]0xE7F4 }
+    @{ Id = 'Memoria'; Nome = 'Memória';     Icone = [char]0xE964 }
+    @{ Id = 'Disco';   Nome = 'Disco (C:)';  Icone = [char]0xEDA2 }
+    @{ Id = 'Rede';    Nome = 'Internet';    Icone = [char]0xE701 }
+)
+
+function Criar-ListaStatus {
+    $script:UI.Status = @{}
+    foreach ($item in $script:ItensStatus) {
+        $linha = New-Object System.Windows.Controls.DockPanel
+        $linha.Margin = Espaco 0 4
+        $ic = Novo-Texto ([string]$item.Icone) 14 '#8A97AD' 'Normal' 'Segoe MDL2 Assets'
+        $ic.Width = 28
+        [System.Windows.Controls.DockPanel]::SetDock($ic, 'Left')
+        $valor = Novo-Texto '...' 12 '#8A97AD' 'SemiBold'
+        [System.Windows.Controls.DockPanel]::SetDock($valor, 'Right')
+        $linha.Children.Add($ic) | Out-Null
+        $linha.Children.Add($valor) | Out-Null
+        $linha.Children.Add((Novo-Texto $item.Nome 13)) | Out-Null
+        $script:UI.ListaStatus.Children.Add($linha) | Out-Null
+        $script:UI.Status[$item.Id] = $valor
+    }
+}
+
+function Definir-Status {
+    param([string]$Id, [string]$Texto, [string]$Nivel)
+    $cores = @{ Normal = '#22C55E'; Atencao = '#FACC15'; Alto = '#EF4444'; Neutro = '#8A97AD' }
+    $script:UI.Status[$Id].Text = $Texto
+    $script:UI.Status[$Id].Foreground = Pincel $cores[$Nivel]
+}
+
+function Classificar {
+    param([int]$Valor, [int]$Atencao, [int]$Alto)
+    if ($Valor -lt 0) { return 'Neutro' }
+    if ($Valor -ge $Alto) { return 'Alto' }
+    if ($Valor -ge $Atencao) { return 'Atencao' }
+    return 'Normal'
+}
+
+function Iniciar-Status {
+    if ($script:StatusRodando) { return }
+    $script:StatusRodando = $true
+    Iniciar-EmSegundoPlano -Trabalho { Obter-StatusSistema } -AoConcluir {
+        param($resultado, $erro)
+        $script:StatusRodando = $false
+        $s = $resultado | Select-Object -First 1
+        if (-not $s) { return }
+        $rotulos = @{ Normal = 'Normal'; Atencao = 'Atenção'; Alto = 'Alto'; Neutro = '--' }
+        $n = Classificar $s.Cpu 70 90;      Definir-Status 'Cpu' ('{0} · {1}%' -f $rotulos[$n], $s.Cpu) $n
+        $n = Classificar $s.Memoria 80 90;  Definir-Status 'Memoria' ('{0} · {1}%' -f $rotulos[$n], $s.Memoria) $n
+        if ($s.DiscoLivre -lt 0) { $n = 'Neutro' } elseif ($s.DiscoLivre -lt 8) { $n = 'Alto' } elseif ($s.DiscoLivre -lt 15) { $n = 'Atencao' } else { $n = 'Normal' }
+        $txtDisco = if ($n -eq 'Normal') { 'Normal' } elseif ($n -eq 'Neutro') { '--' } else { 'Pouco espaço' }
+        Definir-Status 'Disco' ('{0} · {1}% livre' -f $txtDisco, $s.DiscoLivre) $n
+        if ($s.Rede) { Definir-Status 'Rede' 'Conectado' 'Normal' } else { Definir-Status 'Rede' 'Sem conexão' 'Alto' }
+    }
+}
+
+# ---- Ações dos botões
 
 function Ao-Analisar {
     $acoes = Obter-Selecionadas
     if ($acoes.Count -eq 0) { [void](Mostrar-Mensagem 'Marque pelo menos uma ação.'); return }
-    Definir-Ocupado $true
-    try {
-        Escrever-Log '----- ANÁLISE (nada foi alterado) -----'
-        foreach ($linha in (Obter-LinhasAnalise $acoes)) { Escrever-Log $linha }
-    } finally { Definir-Ocupado $false }
+    Definir-Ocupado $true 'Analisando...'
+    Escrever-Log '----- ANÁLISE (nada foi alterado) -----'
+    Iniciar-EmSegundoPlano -Trabalho { param($Acoes) foreach ($a in $Acoes) { Analisar-Acao $a } } -Parametros @{ Acoes = $acoes } -AoConcluir {
+        param($resultado, $erro)
+        Definir-Ocupado $false
+        if ($erro) { Escrever-Log "Erro na análise: $erro"; return }
+        $arquivos = 0; $bytes = [long]0
+        foreach ($r in $resultado) { Escrever-Log "- $($r.Acao.Nome): $($r.Mensagem)"; $arquivos += $r.Arquivos; $bytes += $r.Bytes }
+        Escrever-Log ('Total: {0:N0} arquivo(s), {1} podem ser limpos.' -f $arquivos, (Formatar-Tamanho $bytes))
+        $script:UI.TxtEstado.Text = '{0} podem ser limpos' -f (Formatar-Tamanho $bytes)
+    }
 }
 
 function Ao-Otimizar {
     $acoes = Obter-Selecionadas
     if ($acoes.Count -eq 0) { [void](Mostrar-Mensagem 'Marque pelo menos uma ação.'); return }
-    Definir-Ocupado $true
-    try {
-        Escrever-Log '----- Preparando a otimização -----'
-        $linhas = Obter-LinhasAnalise $acoes
+    Definir-Ocupado $true 'Preparando...'
+    Escrever-Log '----- Preparando a otimização -----'
+    Iniciar-EmSegundoPlano -Trabalho { param($Acoes) foreach ($a in $Acoes) { Analisar-Acao $a } } -Parametros @{ Acoes = $acoes } -AoConcluir {
+        param($resultado, $erro)
+        if ($erro) { Definir-Ocupado $false; Escrever-Log "Erro na análise: $erro"; return }
+        $linhas = foreach ($r in $resultado) { "- $($r.Acao.Nome): $($r.Mensagem)" }
         $msg = "Será feito:`r`n`r`n" + ($linhas -join "`r`n")
-        $msg += "`r`n`r`nOs arquivos ficam guardados em backup por até $($script:DiasBackup) dias. Para devolvê-los, use 'Desfazer última limpeza'."
-        if (Obter-InfoBackup) { $msg += "`r`n`r`nAtenção: o backup da limpeza anterior será apagado de vez." }
+        $msg += "`r`n`r`nOs arquivos ficam guardados em backup por até $($script:DiasBackup) dias. Para devolvê-los, use 'Desfazer'."
+        $temBackup = [bool](Obter-InfoBackup)
+        if ($temBackup) { $msg += "`r`n`r`nAtenção: o backup da limpeza anterior será apagado de vez." }
         $msg += "`r`n`r`nDeseja continuar?"
-
         if ((Mostrar-Mensagem $msg 'Confirmar otimização' 'YesNo' 'Question') -ne 'Yes') {
+            Definir-Ocupado $false
             Escrever-Log 'Otimização cancelada. Nada foi alterado.'
             return
         }
-        if (Obter-InfoBackup) {
-            Escrever-Log 'Apagando o backup da limpeza anterior...'
-            Remover-PastaSegura $script:PastaBackup
+        Definir-Ocupado $true 'Otimizando...'
+        $acoesEscolhidas = @($resultado | ForEach-Object { $_.Acao })
+        Iniciar-EmSegundoPlano -Parametros @{ Acoes = $acoesEscolhidas; ApagarBackup = $temBackup } -Trabalho {
+            param($Acoes, $ApagarBackup)
+            if ($ApagarBackup) { Escrever-Log 'Apagando o backup da limpeza anterior...'; Remover-PastaSegura $PastaBackup }
+            Escrever-Log '----- OTIMIZANDO -----'
+            foreach ($a in $Acoes) {
+                Escrever-Log "$($a.Nome)..."
+                $r = Executar-Acao $a
+                Escrever-Log "  -> $($r.Texto)"
+                $r
+            }
+        } -AoConcluir {
+            param($resultado, $erro)
+            Definir-Ocupado $false
+            if ($erro) { Escrever-Log "Erro na otimização: $erro" }
+            $arquivos = 0; $bytes = [long]0
+            foreach ($r in $resultado) { $arquivos += $r.Arquivos; $bytes += $r.Bytes }
+            Adicionar-Historico 'Otimizacao' ('Otimização: {0:N0} arquivo(s) limpos' -f $arquivos) $arquivos $bytes
+            Atualizar-StatusBackup
+            Escrever-Log ('Otimização concluída: {0} limpos.' -f (Formatar-Tamanho $bytes))
+            $script:UI.TxtEstado.Text = '{0} limpos!' -f (Formatar-Tamanho $bytes)
+            [void](Mostrar-Mensagem ('Otimização concluída! {0} limpos.' -f (Formatar-Tamanho $bytes)))
+            Iniciar-Diagnostico
         }
-        Escrever-Log '----- OTIMIZANDO -----'
-        foreach ($acao in $acoes) {
-            Escrever-Log "$($acao.Nome)..."
-            Escrever-Log "  -> $(Executar-Acao $acao)"
-        }
-        Escrever-Log 'Otimização concluída.'
-        [void](Mostrar-Mensagem 'Otimização concluída. Veja os detalhes na janela.')
-    } finally { Definir-Ocupado $false }
+    }
 }
 
 function Ao-Desfazer {
+    if ($script:Ocupado) { return }
     $info = Obter-InfoBackup
     if (-not $info) { [void](Mostrar-Mensagem 'Não há limpeza para desfazer.'); return }
     $msg = 'Devolver {0:N0} arquivo(s) ({1}) para os locais de onde foram removidos?' -f $info.Arquivos, (Formatar-Tamanho $info.Bytes)
@@ -561,15 +1479,23 @@ function Ao-Desfazer {
     if ($prefixos.Count -gt 0) { $msg += "`r`n`r`nO Chrome ou o Edge está aberto: o cache dele só será devolvido depois que o navegador for fechado." }
     if ((Mostrar-Mensagem $msg 'Desfazer última limpeza' 'YesNo' 'Question') -ne 'Yes') { return }
 
-    Definir-Ocupado $true
-    try {
-        Escrever-Log '----- DESFAZENDO a última limpeza -----'
-        $r = Restaurar-Backup -PastaBackup $script:PastaBackup -PularPrefixos $prefixos
+    Definir-Ocupado $true 'Desfazendo...'
+    Escrever-Log '----- DESFAZENDO a última limpeza -----'
+    Iniciar-EmSegundoPlano -Parametros @{ Prefixos = $prefixos } -Trabalho {
+        param($Prefixos)
+        Restaurar-Backup -PastaBackup $PastaBackup -PularPrefixos $Prefixos
+    } -AoConcluir {
+        param($resultado, $erro)
+        Definir-Ocupado $false
+        $r = $resultado | Select-Object -First 1
+        if (-not $r) { Escrever-Log "Não foi possível desfazer: $erro"; return }
         Escrever-Log ('{0:N0} arquivo(s) devolvidos.' -f $r.Restaurados)
         if ($r.Mantidos)   { Escrever-Log ('{0:N0} mantidos no backup porque o navegador está aberto. Feche-o e clique em Desfazer de novo.' -f $r.Mantidos) }
         if ($r.JaExistiam) { Escrever-Log ('{0:N0} mantidos no backup porque já existe um arquivo novo com o mesmo nome.' -f $r.JaExistiam) }
         if ($r.Falhas)     { Escrever-Log ('{0:N0} não puderam ser devolvidos (sem permissão).' -f $r.Falhas) }
-    } finally { Definir-Ocupado $false }
+        Adicionar-Historico 'Desfazer' ('Limpeza desfeita: {0:N0} arquivo(s) devolvidos' -f $r.Restaurados) $r.Restaurados 0
+        Atualizar-StatusBackup
+    }
 }
 
 function Ao-Esvaziar {
@@ -577,28 +1503,37 @@ function Ao-Esvaziar {
     if (-not $info) { return }
     $msg = 'Apagar de vez o backup ({0:N0} arquivo(s), {1})?{2}{2}Isso libera o espaço, mas depois não dá mais para desfazer a última limpeza.' -f $info.Arquivos, (Formatar-Tamanho $info.Bytes), "`r`n"
     if ((Mostrar-Mensagem $msg 'Esvaziar backup' 'YesNo' 'Warning') -ne 'Yes') { return }
-    Definir-Ocupado $true
-    try {
-        Remover-PastaSegura $script:PastaBackup
-        Escrever-Log ('Backup apagado: {0} liberados.' -f (Formatar-Tamanho $info.Bytes))
-    } finally { Definir-Ocupado $false }
-}
-
-function Ao-Diagnostico {
-    Definir-Ocupado $true
-    try {
-        Escrever-Log 'Coletando diagnóstico...'
-        foreach ($linha in (Obter-Diagnostico)) { $script:txtLog.AppendText($linha + "`r`n") }
-    } finally { Definir-Ocupado $false }
+    Definir-Ocupado $true 'Liberando espaço...'
+    Iniciar-EmSegundoPlano -Parametros @{ Bytes = $info.Bytes } -Trabalho {
+        param($Bytes)
+        Remover-PastaSegura $PastaBackup
+        $Bytes
+    } -AoConcluir {
+        param($resultado, $erro)
+        Definir-Ocupado $false
+        Escrever-Log ('Backup apagado: {0} liberados.' -f (Formatar-Tamanho ($resultado | Select-Object -First 1)))
+    }
 }
 
 function Ao-Inicializacao {
     try {
         Start-Process -FilePath 'taskmgr.exe' -ArgumentList '/0', '/startup'
-        Escrever-Log 'Gerenciador de Tarefas aberto na aba Inicialização. Para desativar um programa: clique nele e em "Desabilitar". Para voltar atrás: "Habilitar".'
+        Escrever-Log 'Gerenciador de Tarefas aberto na aba Inicialização.'
     } catch {
-        Escrever-Log 'Não foi possível abrir o Gerenciador de Tarefas.'
+        [void](Mostrar-Mensagem 'Não foi possível abrir o Gerenciador de Tarefas.' 'Programas de inicialização' 'OK' 'Warning')
     }
+}
+
+function Ao-VerNovidades {
+    try { Start-Process -FilePath $script:UrlReleases } catch { Escrever-Log "As novidades estão em: $($script:UrlReleases)" }
+}
+
+function Salvar-Preferencias {
+    $config = [pscustomobject]@{
+        AcoesPadrao = @($script:Acoes | Where-Object { $script:UI.ChavesConfig[$_.Id].IsChecked } | ForEach-Object { $_.Id })
+        VerificarAtualizacoes = [bool]$script:UI.ChkVerificarAtualizacoes.IsChecked
+    }
+    Salvar-Config $config
 }
 
 function Ao-Abrir {
@@ -608,133 +1543,108 @@ function Ao-Abrir {
         Escrever-Log ("Backup com mais de $($script:DiasBackup) dias apagado automaticamente ({0} liberados)." -f (Formatar-Tamanho $info.Bytes))
     }
     Atualizar-StatusBackup
-    if ($script:ArgsInicio -contains '/atualizado') { Escrever-Log "Atualizado para a versão $($script:Versao)." }
     Escrever-Log 'Pronto. Clique em "Analisar" para ver o que será feito ou em "Otimizar" para limpar.'
     Remover-PastaSegura $script:PastaDownload   # instalador baixado numa atualização anterior
-    Iniciar-VerificacaoAtualizacao
-}
-
-function Novo-Botao {
-    param([string]$Texto, [int]$X, [int]$Y, [int]$Largura, [string]$Ajuda)
-    $b = New-Object System.Windows.Forms.Button
-    $b.Text = $Texto
-    $b.Location = New-Object System.Drawing.Point($X, $Y)
-    $b.Size = New-Object System.Drawing.Size($Largura, 34)
-    $script:UI.Dica.SetToolTip($b, $Ajuda)
-    $script:UI.Form.Controls.Add($b)
-    $script:UI.Botoes += $b
-    return $b
-}
-
-function Criar-Interface {
-    $form = New-Object System.Windows.Forms.Form
-    $form.Text = "$($script:NomeApp) $($script:Versao)"
-    $form.ClientSize = New-Object System.Drawing.Size(740, 640)
-    $form.StartPosition = 'CenterScreen'
-    $form.FormBorderStyle = 'FixedSingle'
-    $form.MaximizeBox = $false
-    $form.Font = New-Object System.Drawing.Font('Segoe UI', 9)
-    $form.KeyPreview = $true
-    $script:UI.Form = $form
-    $script:UI.Dica = New-Object System.Windows.Forms.ToolTip
-    $script:UI.Botoes = @()
-    $script:UI.Caixas = @{}
-
-    $titulo = New-Object System.Windows.Forms.Label
-    $titulo.Text = 'Otimizador de PC'
-    $titulo.Font = New-Object System.Drawing.Font('Segoe UI', 14, [System.Drawing.FontStyle]::Bold)
-    $titulo.Location = New-Object System.Drawing.Point(16, 10)
-    $titulo.AutoSize = $true
-    $form.Controls.Add($titulo)
-
-    # Só aparece quando há uma versão nova no GitHub
-    $btnAtualizar = New-Object System.Windows.Forms.Button
-    $btnAtualizar.Location = New-Object System.Drawing.Point(474, 10)
-    $btnAtualizar.Size = New-Object System.Drawing.Size(250, 34)
-    $btnAtualizar.BackColor = [System.Drawing.Color]::FromArgb(46, 125, 50)
-    $btnAtualizar.ForeColor = [System.Drawing.Color]::White
-    $btnAtualizar.FlatStyle = 'Flat'
-    $btnAtualizar.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
-    $btnAtualizar.Visible = $false
-    $btnAtualizar.Add_Click({ Ao-Atualizar })
-    $form.Controls.Add($btnAtualizar)
-    $script:UI.BtnAtualizar = $btnAtualizar
-
-    $sub = New-Object System.Windows.Forms.Label
-    $sub.Text = 'Marque o que deseja fazer. "Analisar" mostra antes o que será feito, sem alterar nada.'
-    $sub.Location = New-Object System.Drawing.Point(18, 42)
-    $sub.AutoSize = $true
-    $form.Controls.Add($sub)
-
-    $grupo = New-Object System.Windows.Forms.GroupBox
-    $grupo.Text = 'Ações de limpeza'
-    $grupo.Location = New-Object System.Drawing.Point(16, 66)
-    $grupo.Size = New-Object System.Drawing.Size(708, 262)
-    $form.Controls.Add($grupo)
-
-    $y = 22
-    foreach ($acao in $script:Acoes) {
-        $cb = New-Object System.Windows.Forms.CheckBox
-        $cb.Text = $acao.Titulo
-        $cb.Checked = $true
-        $cb.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
-        $cb.Location = New-Object System.Drawing.Point(14, $y)
-        $cb.AutoSize = $true
-        $grupo.Controls.Add($cb)
-        $script:UI.Caixas[$acao.Id] = $cb
-
-        $desc = New-Object System.Windows.Forms.Label
-        $desc.Text = $acao.Descricao
-        $desc.ForeColor = [System.Drawing.Color]::DimGray
-        $desc.Location = New-Object System.Drawing.Point(32, ($y + 21))
-        $desc.AutoSize = $true
-        $grupo.Controls.Add($desc)
-        $y += 47
+    Iniciar-Diagnostico
+    Iniciar-Status
+    if ((Ler-Config).VerificarAtualizacoes) { Iniciar-VerificacaoAtualizacao }
+    if ($script:ArgsInicio -contains '/atualizado') {
+        Escrever-Log "Atualizado para a versão $($script:Versao)."
+        if ($script:NotasVersao) {
+            [void](Mostrar-Mensagem "O $($script:NomeApp) foi atualizado para a versão $($script:Versao).`r`n`r`nO que mudou:`r`n$($script:NotasVersao)" "Novidades da versão $($script:Versao)")
+        }
     }
+}
 
-    $btnAnalisar = Novo-Botao '&Analisar' 16 340 170 'Mostra o que será feito, sem alterar nada.'
-    $btnOtimizar = Novo-Botao '&Otimizar' 194 340 170 'Mostra o resumo, pede confirmação e faz a limpeza.'
-    $btnOtimizar.BackColor = [System.Drawing.Color]::FromArgb(220, 240, 220)
-    $btnOtimizar.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
-    $btnDiag     = Novo-Botao 'Dia&gnóstico' 372 340 170 'Mostra informações do PC e recomendações (somente leitura).'
-    $btnInic     = Novo-Botao 'Programas de &inicialização' 550 340 174 'Abre o Gerenciador de Tarefas na aba Inicialização. Nada é desativado sozinho.'
-    $script:UI.BtnDesfazer = Novo-Botao '&Desfazer última limpeza (Ctrl+Z)' 16 382 348 'Devolve os arquivos da última limpeza para onde estavam.'
-    $script:UI.BtnEsvaziar = Novo-Botao '&Esvaziar backup' 372 382 352 'Apaga de vez o backup da última limpeza para liberar o espaço. Depois disso não dá para desfazer.'
+function Criar-Janela {
+    $janela = [System.Windows.Markup.XamlReader]::Parse($script:Xaml)
+    $script:UI.Janela = $janela
+    $nomes = 'BarraTitulo', 'TxtVersao', 'BtnAtualizar', 'TxtBtnAtualizar', 'BtnMinimizar', 'BtnFechar',
+             'PontoSaude', 'TxtSaudeLateral', 'NavInicio', 'NavDiagnostico', 'NavHistorico', 'NavInicializacao', 'NavConfig',
+             'PaginaInicio', 'PaginaDiagnostico', 'PaginaHistorico', 'PaginaInicializacao', 'PaginaConfig',
+             'ListaAcoes', 'BtnLimparLog', 'TxtLog', 'AnelInicio', 'TxtNotaInicio', 'TxtEstado', 'TxtSelecionadas',
+             'BarraProgresso', 'BtnOtimizar', 'BtnAnalisar', 'ListaStatus', 'BtnVerHistorico', 'TxtUltimaLimpeza',
+             'TxtBackup', 'BtnDesfazer', 'BtnEsvaziar', 'BtnAtualizarDiag', 'AnelDiag', 'TxtNotaDiag', 'TxtRotuloDiag',
+             'ListaDicas', 'TxtDiagnostico', 'TxtHistoricoVazio', 'ListaHistorico', 'BtnAbrirInicializacao',
+             'ListaConfigAcoes', 'ChkVerificarAtualizacoes', 'BtnProcurarAtualizacao', 'TxtStatusAtualizacao',
+             'TxtSobre', 'BtnNovidades'
+    foreach ($nome in $nomes) { $script:UI[$nome] = $janela.FindName($nome) }
 
-    $lbl = New-Object System.Windows.Forms.Label
-    $lbl.Location = New-Object System.Drawing.Point(18, 424)
-    $lbl.Size = New-Object System.Drawing.Size(706, 20)
-    $lbl.ForeColor = [System.Drawing.Color]::DarkSlateBlue
-    $form.Controls.Add($lbl)
-    $script:UI.LblBackup = $lbl
+    $script:UI.TxtVersao.Text = "v$($script:Versao)"
+    $script:UI.TxtSobre.Text = "$($script:NomeApp) versão $($script:Versao)`r`nCódigo e novidades: github.com/$($script:RepoGitHub)"
 
-    $log = New-Object System.Windows.Forms.TextBox
-    $log.Multiline = $true
-    $log.ReadOnly = $true
-    $log.ScrollBars = 'Vertical'
-    $log.BackColor = [System.Drawing.Color]::White
-    $log.Font = New-Object System.Drawing.Font('Consolas', 9)
-    $log.Location = New-Object System.Drawing.Point(16, 448)
-    $log.Size = New-Object System.Drawing.Size(708, 176)
-    $form.Controls.Add($log)
-    $script:txtLog = $log
+    # Ações (tela inicial) e preferências (configurações)
+    $config = Ler-Config
+    $script:UI.Chaves = @{}
+    $script:UI.ChavesConfig = @{}
+    foreach ($acao in $script:Acoes) {
+        $marcada = $config.AcoesPadrao -contains $acao.Id
+        $item = Nova-LinhaInterruptor $acao $marcada
+        $script:UI.ListaAcoes.Children.Add($item.Linha) | Out-Null
+        $script:UI.Chaves[$acao.Id] = $item.Chave
+        $item.Chave.Add_Click({ Atualizar-Selecionadas })
 
-    $btnAnalisar.Add_Click({ Ao-Analisar })
-    $btnOtimizar.Add_Click({ Ao-Otimizar })
-    $btnDiag.Add_Click({ Ao-Diagnostico })
-    $btnInic.Add_Click({ Ao-Inicializacao })
-    $script:UI.BtnDesfazer.Add_Click({ Ao-Desfazer })
-    $script:UI.BtnEsvaziar.Add_Click({ Ao-Esvaziar })
-    $form.Add_Shown({ Ao-Abrir })
-    $form.Add_KeyDown({
+        $itemConfig = Nova-LinhaInterruptor $acao $marcada $true
+        $script:UI.ListaConfigAcoes.Children.Add($itemConfig.Linha) | Out-Null
+        $script:UI.ChavesConfig[$acao.Id] = $itemConfig.Chave
+        $itemConfig.Chave.Add_Click({ Salvar-Preferencias })
+    }
+    $script:UI.ChkVerificarAtualizacoes.IsChecked = $config.VerificarAtualizacoes
+    $script:UI.ChkVerificarAtualizacoes.Add_Click({ Salvar-Preferencias })
+    Atualizar-Selecionadas
+    Criar-ListaStatus
+    Definir-Anel $script:UI.AnelInicio 0.5 84 8
+    Definir-Anel $script:UI.AnelDiag 0.5 150 12
+
+    # Janela
+    $script:UI.BarraTitulo.Add_MouseLeftButtonDown({ $script:UI.Janela.DragMove() })
+    $script:UI.BtnMinimizar.Add_Click({ $script:UI.Janela.WindowState = 'Minimized' })
+    $script:UI.BtnFechar.Add_Click({ $script:UI.Janela.Close() })
+    $janela.Add_KeyDown({
         param($origem, $e)
-        if ($e.Control -and $e.KeyCode -eq [System.Windows.Forms.Keys]::Z -and $script:UI.BtnDesfazer.Enabled) {
+        if ($e.Key -eq 'Z' -and ([System.Windows.Input.Keyboard]::Modifiers -band [System.Windows.Input.ModifierKeys]::Control) -and $script:UI.BtnDesfazer.IsEnabled) {
             $e.Handled = $true
             Ao-Desfazer
         }
     })
 
-    return $form
+    # Menu
+    $script:UI.NavInicio.Add_Checked({ Mostrar-Pagina 'PaginaInicio' })
+    $script:UI.NavDiagnostico.Add_Checked({ Mostrar-Pagina 'PaginaDiagnostico' })
+    $script:UI.NavHistorico.Add_Checked({ Mostrar-Pagina 'PaginaHistorico' })
+    $script:UI.NavInicializacao.Add_Checked({ Mostrar-Pagina 'PaginaInicializacao' })
+    $script:UI.NavConfig.Add_Checked({ Mostrar-Pagina 'PaginaConfig' })
+
+    # Botões
+    $script:UI.BtnOtimizar.Add_Click({ Ao-Otimizar })
+    $script:UI.BtnAnalisar.Add_Click({ Ao-Analisar })
+    $script:UI.BtnDesfazer.Add_Click({ Ao-Desfazer })
+    $script:UI.BtnEsvaziar.Add_Click({ Ao-Esvaziar })
+    $script:UI.BtnLimparLog.Add_Click({ $script:UI.TxtLog.Clear() })
+    $script:UI.BtnVerHistorico.Add_Click({ $script:UI.NavHistorico.IsChecked = $true })
+    $script:UI.BtnAtualizarDiag.Add_Click({ Iniciar-Diagnostico })
+    $script:UI.BtnAbrirInicializacao.Add_Click({ Ao-Inicializacao })
+    $script:UI.BtnAtualizar.Add_Click({ Ao-Atualizar })
+    $script:UI.BtnProcurarAtualizacao.Add_Click({ Iniciar-VerificacaoAtualizacao -Manual })
+    $script:UI.BtnNovidades.Add_Click({ Ao-VerNovidades })
+
+    # Timers: tarefas/registro (rápido) e status do sistema (a cada 3 s)
+    $timer = New-Object System.Windows.Threading.DispatcherTimer
+    $timer.Interval = [TimeSpan]::FromMilliseconds(150)
+    $timer.Add_Tick({ Processar-Tarefas })
+    $timer.Start()
+    $timerStatus = New-Object System.Windows.Threading.DispatcherTimer
+    $timerStatus.Interval = [TimeSpan]::FromSeconds(3)
+    $timerStatus.Add_Tick({ Iniciar-Status })
+    $timerStatus.Start()
+    $script:UI.Timers = @($timer, $timerStatus)
+
+    $janela.Add_ContentRendered({ Ao-Abrir })
+    $janela.Add_Closed({
+        foreach ($t in $script:UI.Timers) { $t.Stop() }
+        if ($script:Pool) { $script:Pool.Close() }
+    })
+    return $janela
 }
 
 # ------------------------------------------------------------------ Instalação
@@ -839,7 +1749,7 @@ function Agendar-RemocaoDoPrograma {
 }
 
 function Desinstalar-App {
-    # Remove atalhos, a entrada do Painel de Controle, os dados (backup) e o programa.
+    # Remove atalhos, a entrada do Painel de Controle, os dados (backup, histórico) e o programa.
     Remover-Atalho (Obter-AtalhoMenu)
     Remover-Atalho (Obter-AtalhoDesktop)
     [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($script:ChaveDesinstalar, $false)
@@ -928,7 +1838,7 @@ function Mostrar-Instalador {
 
     if ($instalada) {
         $texto = "Versão instalada: $instalada`r`nNova versão: $($script:Versao)`r`n`r`n" +
-                 "O backup da última limpeza e os atalhos são mantidos."
+                 "O backup da última limpeza, o histórico e os atalhos são mantidos."
     } else {
         $texto = "Versão $($script:Versao)`r`n`r`nSerá instalado em:`r`n$($script:PastaInstalacao)`r`n`r`n" +
                  "- Só para este usuário, não precisa de administrador.`r`n" +
@@ -969,61 +1879,49 @@ function Mostrar-Instalador {
 # 4. O instalador espera o app fechar, instala por cima e abre o app de novo.
 # Sem internet ou com o GitHub bloqueado, nada aparece e o app funciona normalmente.
 
-$script:PastaDownload = Join-Path $script:PastaApp 'Atualizacao'
-
-# Roda em outra thread, então não pode usar as funções do script.
-$script:ScriptVerificacao = {
-    param([string]$Url)
-    try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-        $wc = New-Object System.Net.WebClient
-        $wc.Headers['User-Agent'] = 'OtimizadorPC'
-        $wc.Encoding = [System.Text.Encoding]::UTF8
-        if ($wc.Proxy) { $wc.Proxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials }
-        return ($wc.DownloadString($Url) | ConvertFrom-Json)
-    } catch {
-        return $null
-    }
-}
-
 function Novo-ClienteWeb {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $wc = New-Object System.Net.WebClient
     $wc.Headers['User-Agent'] = 'OtimizadorPC'
+    $wc.Encoding = [System.Text.Encoding]::UTF8
     if ($wc.Proxy) { $wc.Proxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials }
     return $wc
 }
 
 function Iniciar-VerificacaoAtualizacao {
+    param([switch]$Manual)
     # Só o app instalado se atualiza ("Abrir sem instalar" não).
-    if (-not (Test-MesmoCaminho (Obter-ExeAtual) $script:ExeInstalado)) { return }
-
-    $ps = [powershell]::Create()
-    [void]$ps.AddScript($script:ScriptVerificacao).AddArgument("$($script:UrlReleases)/latest/download/versao.json")
-    $script:Verificacao = @{ PS = $ps; Handle = $ps.BeginInvoke() }
-
-    $timer = New-Object System.Windows.Forms.Timer
-    $timer.Interval = 500
-    $timer.Add_Tick({ Ao-VerificacaoConcluida })
-    $script:UI.TimerAtualizacao = $timer
-    $timer.Start()
-}
-
-function Ao-VerificacaoConcluida {
-    $v = $script:Verificacao
-    if (-not $v.Handle.IsCompleted) { return }
-    $script:UI.TimerAtualizacao.Stop()
-    try { $info = $v.PS.EndInvoke($v.Handle) | Select-Object -First 1 } catch { $info = $null } finally { $v.PS.Dispose() }
-
-    if (-not $info) { return }
-    $versao = [string]$info.versao
-    if ($versao -notmatch '^\d+(\.\d+){1,3}$' -or [string]$info.sha256 -notmatch '^[0-9a-fA-F]{64}$') { return }
-    if (-not (Test-VersaoMaisNova $versao $script:Versao)) { return }
-
-    $script:Atualizacao = $info
-    $script:UI.BtnAtualizar.Text = "Atualizar para a versão $versao"
-    $script:UI.BtnAtualizar.Visible = $true
-    Escrever-Log "Nova versão disponível: $versao. Clique no botão verde ""Atualizar"" no alto da janela."
+    if (-not (Test-MesmoCaminho (Obter-ExeAtual) $script:ExeInstalado)) {
+        if ($Manual) { $script:UI.TxtStatusAtualizacao.Text = 'Só o app instalado pode se atualizar.' }
+        return
+    }
+    if ($Manual) { $script:UI.TxtStatusAtualizacao.Text = 'Procurando...' }
+    $script:VerificacaoManual = [bool]$Manual
+    Iniciar-EmSegundoPlano -Parametros @{ Url = "$($script:UrlReleases)/latest/download/versao.json" } -Trabalho {
+        param($Url)
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+            $wc = New-Object System.Net.WebClient
+            $wc.Headers['User-Agent'] = 'OtimizadorPC'
+            $wc.Encoding = [System.Text.Encoding]::UTF8
+            if ($wc.Proxy) { $wc.Proxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials }
+            $wc.DownloadString($Url) | ConvertFrom-Json
+        } catch { }
+    } -AoConcluir {
+        param($resultado, $erro)
+        $info = $resultado | Select-Object -First 1
+        $versao = if ($info) { [string]$info.versao } else { '' }
+        $valido = $info -and $versao -match '^\d+(\.\d+){1,3}$' -and [string]$info.sha256 -match '^[0-9a-fA-F]{64}$'
+        if ($valido -and (Test-VersaoMaisNova $versao $script:Versao)) {
+            $script:Atualizacao = $info
+            $script:UI.TxtBtnAtualizar.Text = "Atualizar para a versão $versao"
+            $script:UI.BtnAtualizar.Visibility = 'Visible'
+            $script:UI.TxtStatusAtualizacao.Text = "Versão $versao disponível."
+            Escrever-Log "Nova versão disponível: $versao. Clique no botão verde ""Atualizar"" no alto da janela."
+        } elseif ($script:VerificacaoManual) {
+            $script:UI.TxtStatusAtualizacao.Text = if ($valido) { 'Você já está na versão mais recente.' } else { 'Não foi possível verificar agora (sem internet?).' }
+        }
+    }
 }
 
 function Ao-Atualizar {
@@ -1034,7 +1932,7 @@ function Ao-Atualizar {
     $msg += "`r`n`r`nBaixar e atualizar agora? O Otimizador vai fechar e abrir de novo sozinho."
     if ((Mostrar-Mensagem $msg 'Atualizar' 'YesNo' 'Question') -ne 'Yes') { return }
 
-    Definir-Ocupado $true
+    Definir-Ocupado $true 'Baixando atualização...'
     try {
         Escrever-Log "Baixando a versão $($info.versao)..."
         [void][System.IO.Directory]::CreateDirectory($script:PastaDownload)
@@ -1050,11 +1948,11 @@ function Ao-Atualizar {
 
         Escrever-Log 'Download conferido. Atualizando...'
         Start-Process -FilePath $arquivo -ArgumentList '/atualizar'
-        $script:UI.Form.Close()
+        $script:UI.Janela.Close()
     } catch {
+        Definir-Ocupado $false
         Escrever-Log "Não foi possível atualizar: $($_.Exception.Message)"
         [void](Mostrar-Mensagem "Não foi possível atualizar agora:`r`n$($_.Exception.Message)`r`n`r`nO app continua funcionando na versão $($script:Versao)." 'Atualizar' 'OK' 'Warning')
-        Definir-Ocupado $false
     }
 }
 
@@ -1096,7 +1994,6 @@ $abrirApp = ([System.IO.Path]::GetFileName($exeAtual) -match '^(powershell|power
 if (-not $abrirApp) { $abrirApp = Mostrar-Instalador }
 
 if ($abrirApp) {
-    $janela = Criar-Interface
+    $janela = Criar-Janela
     [void]$janela.ShowDialog()
-    $janela.Dispose()
 }

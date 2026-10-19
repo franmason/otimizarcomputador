@@ -20,8 +20,11 @@ O app é instalado só para o usuário atual, cria um ícone na Área de Trabalh
 ## Lançar uma versão nova
 
 1. Altere o código e aumente `$script:Versao` no `Otimizador.ps1`.
-2. `.\Gerar-EXE.ps1 -Novidades "O que mudou"`
-3. `git commit` e `git push`
-4. `.\Publicar-Atualizacao.ps1`
+2. Escreva o que mudou no [NOVIDADES.md](NOVIDADES.md), numa seção `## <versão>`.
+3. `.\Gerar-EXE.ps1`
+4. `git commit` e `git push`
+5. `.\Publicar-Atualizacao.ps1`
+
+As novidades aparecem para o cliente antes de atualizar, depois de atualizar e na página de Releases.
 
 Tudo é feito em PowerShell; o [PS2EXE](https://github.com/MScholtes/PS2EXE) empacota o script em `.exe`.

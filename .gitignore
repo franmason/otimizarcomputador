@@ -1,3 +1,6 @@
 # Gerados pelo Gerar-EXE.ps1 (vão anexados na Release, não no código)
 *.exe
 versao.json
+
+# Capturas dos testes de interface
+testes/saida/

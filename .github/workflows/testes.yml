@@ -1,0 +1,34 @@
+# Roda os testes numa máquina Windows descartável do GitHub a cada push.
+# As capturas de tela ficam em "Artifacts" na página da execução (aba Actions).
+name: Testes
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  testes:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Testes de limpeza (sem janelas)
+        shell: powershell
+        run: .\testes\Testar-Limpeza.ps1
+
+      - name: Gerar o instalador
+        shell: powershell
+        run: .\Gerar-EXE.ps1
+
+      - name: Testes de interface (instala, usa, atualiza e desinstala)
+        shell: powershell
+        run: .\testes\Testar-Interface.ps1
+
+      - name: Guardar capturas de tela
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: capturas
+          path: testes/saida
+          if-no-files-found: ignore
