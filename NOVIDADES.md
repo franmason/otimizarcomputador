@@ -15,6 +15,8 @@ Escreva para quem usa o app, em frases curtas.
 - Novas limpezas seguras: relatórios de erro antigos do Windows e cache de gráficos.
 - O cache de gráficos do Chrome e do Edge também é limpo (você continua logado em tudo).
 - Link "O que será feito?" explica cada ação em palavras simples (e ao passar o mouse).
+- Nova aba "Teste de internet": mede download, upload, ping e oscilação e diz se dá para fazer chamadas.
+- Animação da lixeira enquanto o PC é otimizado.
 
 ## 1.0.0
 - Primeira versão.

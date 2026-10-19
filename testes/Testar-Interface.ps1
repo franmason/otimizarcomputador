@@ -195,6 +195,13 @@ try {
     Clicar $w 'NavDiagnostico'
     Confere 'diagnóstico terminou' ([bool](Esperar-Texto $w 'TxtRotuloDiag' { param($t) $t -ne 'Analisando...' }))
     Capturar $w '04-diagnostico'
+    Clicar $w 'NavInternet'
+    Clicar $w 'BtnTestarInternet'
+    Start-Sleep -Seconds 6
+    Capturar $w '05a-internet-testando'
+    Confere 'teste de internet concluído' ([bool](Esperar-Texto $w 'TxtFaseTeste' { param($t) $t -in 'Teste concluído', 'Não foi possível testar' } 90))
+    Confere 'download medido' ((Texto $w 'TxtDownload') -match '^[\d.,]+$')
+    Capturar $w '05b-internet-resultado'
     Clicar $w 'NavHistorico';     Capturar $w '05-historico-vazio'
     Clicar $w 'NavInicializacao'; Capturar $w '06-inicializacao'
     Clicar $w 'NavConfig';        Capturar $w '07-configuracoes'
@@ -216,8 +223,14 @@ try {
     $m = Esperar-Janela $app.Processo.Id 'Confirmar otimização'
     Capturar $m '09-confirmar-otimizacao'
     Clicar $m $SIM
-    $m = Esperar-Janela $app.Processo.Id 'Otimizador de PC' 120 ([IntPtr]$w.Current.NativeWindowHandle)
-    Clicar $m $OK
+    Start-Sleep -Milliseconds 900
+    Capturar $w '09b-animacao-lixeira'
+    Confere 'animação terminou e mostrou o botão Concluir' ([bool](Esperar-Elemento $w 'BtnFecharAnim' 120))
+    Start-Sleep -Seconds 1
+    Confere 'animação mostra o total limpo' ((Texto $w 'TxtAnimTitulo') -like '*limpos!')
+    Capturar $w '09c-animacao-concluida'
+    Clicar $w 'BtnFecharAnim'
+    Start-Sleep -Milliseconds 500
     Confere 'arquivos antigos de teste saíram do %TEMP%' (-not (Test-Path (Join-Path $lixo 'antigo1.tmp')))
     Confere 'última limpeza preenchida' ((Texto $w 'TxtUltimaLimpeza') -like 'Hoje*')
     Capturar $w '10-pos-otimizacao'

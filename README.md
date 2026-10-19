@@ -7,6 +7,7 @@ App leve para Windows que faz só limpezas seguras, sem precisar de administrado
 - relatórios de erro antigos do Windows e cache de gráficos (DirectX)
 - cache de DNS
 - diagnóstico do PC (somente leitura)
+- teste de internet (download, upload, ping e oscilação, pelos servidores de teste da Cloudflare)
 - atalho para os programas de inicialização do Gerenciador de Tarefas
 
 Não mexe em registro, serviços, energia, senhas, histórico, cookies, favoritos ou arquivos pessoais,

@@ -648,7 +648,17 @@ function Processar-Tarefas {
         try { $linhas = $script:FilaLog.ToArray(); $script:FilaLog.Clear() } finally { [System.Threading.Monitor]::Exit($script:FilaLog.SyncRoot) }
         $script:UI.TxtLog.AppendText(($linhas -join "`r`n") + "`r`n")
         $script:UI.TxtLog.ScrollToEnd()
+        # Durante a animação, mostra o que está sendo limpo agora (linhas "Nome...")
+        if ($script:UI.Overlay.Visibility -eq 'Visible') {
+            foreach ($linha in $linhas) {
+                foreach ($acao in $script:Acoes) {
+                    if ($linha -like "*] $($acao.Nome)...") { $script:UI.TxtAnimDetalhe.Text = "Limpando: $($acao.Nome)" }
+                }
+            }
+        }
     }
+
+    if ($script:TesteInternet) { Atualizar-TesteInternet $script:TesteInternet }
 }
 
 # ------------------------------------------------------------------ Interface (WPF)
@@ -898,6 +908,7 @@ $script:Xaml = @'
             <StackPanel>
               <RadioButton x:Name="NavInicio" Style="{StaticResource Menu}" Tag="&#xE80F;" Content="Início" IsChecked="True"/>
               <RadioButton x:Name="NavDiagnostico" Style="{StaticResource Menu}" Tag="&#xE9D9;" Content="Diagnóstico"/>
+              <RadioButton x:Name="NavInternet" Style="{StaticResource Menu}" Tag="&#xE701;" Content="Teste de internet"/>
               <RadioButton x:Name="NavHistorico" Style="{StaticResource Menu}" Tag="&#xE81C;" Content="Histórico"/>
               <RadioButton x:Name="NavInicializacao" Style="{StaticResource Menu}" Tag="&#xE7E8;" Content="Inicialização"/>
               <RadioButton x:Name="NavConfig" Style="{StaticResource Menu}" Tag="&#xE713;" Content="Configurações"/>
@@ -1144,6 +1155,106 @@ $script:Xaml = @'
             </Border>
           </StackPanel>
 
+          <!-- Página: Teste de internet -->
+          <Grid x:Name="PaginaInternet" Visibility="Collapsed">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <StackPanel Margin="0,0,0,14">
+              <TextBlock Text="Teste de internet" FontSize="24" FontWeight="Bold"/>
+              <TextBlock Style="{StaticResource TextoSuave}" FontSize="13"
+                         Text="Mede a velocidade da sua conexão. Cada teste usa até cerca de 130 MB de internet."/>
+            </StackPanel>
+            <Grid Grid.Row="1">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="330"/>
+                <ColumnDefinition Width="*"/>
+              </Grid.ColumnDefinitions>
+              <Border Style="{StaticResource EstiloCartao}" Padding="20" VerticalAlignment="Top">
+                <StackPanel>
+                  <Grid Width="260" Height="150" HorizontalAlignment="Center">
+                    <Path x:Name="ArcoFundoInternet" Stroke="#1F2C45" StrokeThickness="14" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                    <Path x:Name="ArcoInternet" StrokeThickness="14" StrokeStartLineCap="Round" StrokeEndLineCap="Round">
+                      <Path.Stroke>
+                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                          <GradientStop Color="#3B82F6" Offset="0"/>
+                          <GradientStop Color="#22C55E" Offset="1"/>
+                        </LinearGradientBrush>
+                      </Path.Stroke>
+                    </Path>
+                    <StackPanel VerticalAlignment="Bottom" HorizontalAlignment="Center" Margin="0,0,0,8">
+                      <TextBlock x:Name="TxtVelocidade" Text="0" FontSize="40" FontWeight="Bold" HorizontalAlignment="Center"/>
+                      <TextBlock Text="Mbps" Style="{StaticResource TextoSuave}" FontSize="13" HorizontalAlignment="Center"/>
+                    </StackPanel>
+                  </Grid>
+                  <TextBlock x:Name="TxtFaseTeste" Text="Pronto para testar" FontSize="15" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,14,0,0"/>
+                  <Button x:Name="BtnTestarInternet" Style="{StaticResource BotaoPrincipal}" Margin="0,16,0,0">
+                    <StackPanel Orientation="Horizontal">
+                      <TextBlock Text="&#xE768;" Style="{StaticResource Icone}" Margin="0,0,10,0"/>
+                      <TextBlock x:Name="TxtBtnTestar" Text="Iniciar teste"/>
+                    </StackPanel>
+                  </Button>
+                  <TextBlock x:Name="TxtServidorTeste" Style="{StaticResource TextoSuave}" FontSize="11" HorizontalAlignment="Center" TextAlignment="Center" Margin="0,10,0,0"
+                             Text="Servidor de teste: Cloudflare"/>
+                </StackPanel>
+              </Border>
+              <StackPanel Grid.Column="1" Margin="16,0,0,0">
+                <UniformGrid Columns="2">
+                  <Border Style="{StaticResource EstiloCartao}" Margin="0,0,6,12">
+                    <StackPanel>
+                      <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE896;" Style="{StaticResource Icone}" Foreground="#22C55E" FontSize="15" Margin="0,0,8,0"/>
+                        <TextBlock Text="Download" Style="{StaticResource TextoSuave}" FontSize="13"/>
+                      </StackPanel>
+                      <TextBlock x:Name="TxtDownload" Text="--" FontSize="26" FontWeight="Bold" Margin="0,6,0,0"/>
+                      <TextBlock Text="Mbps · receber (sites, vídeos)" Style="{StaticResource TextoSuave}" FontSize="11"/>
+                    </StackPanel>
+                  </Border>
+                  <Border Style="{StaticResource EstiloCartao}" Margin="6,0,0,12">
+                    <StackPanel>
+                      <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE898;" Style="{StaticResource Icone}" Foreground="#4F9BFF" FontSize="15" Margin="0,0,8,0"/>
+                        <TextBlock Text="Upload" Style="{StaticResource TextoSuave}" FontSize="13"/>
+                      </StackPanel>
+                      <TextBlock x:Name="TxtUpload" Text="--" FontSize="26" FontWeight="Bold" Margin="0,6,0,0"/>
+                      <TextBlock Text="Mbps · enviar (sua voz, arquivos)" Style="{StaticResource TextoSuave}" FontSize="11"/>
+                    </StackPanel>
+                  </Border>
+                  <Border Style="{StaticResource EstiloCartao}" Margin="0,0,6,12">
+                    <StackPanel>
+                      <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE916;" Style="{StaticResource Icone}" Foreground="#FACC15" FontSize="15" Margin="0,0,8,0"/>
+                        <TextBlock Text="Ping" Style="{StaticResource TextoSuave}" FontSize="13"/>
+                      </StackPanel>
+                      <TextBlock x:Name="TxtPing" Text="--" FontSize="26" FontWeight="Bold" Margin="0,6,0,0"/>
+                      <TextBlock Text="ms · tempo de resposta" Style="{StaticResource TextoSuave}" FontSize="11"/>
+                    </StackPanel>
+                  </Border>
+                  <Border Style="{StaticResource EstiloCartao}" Margin="6,0,0,12">
+                    <StackPanel>
+                      <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE9D9;" Style="{StaticResource Icone}" Foreground="#DB2777" FontSize="15" Margin="0,0,8,0"/>
+                        <TextBlock Text="Oscilação" Style="{StaticResource TextoSuave}" FontSize="13"/>
+                      </StackPanel>
+                      <TextBlock x:Name="TxtJitter" Text="--" FontSize="26" FontWeight="Bold" Margin="0,6,0,0"/>
+                      <TextBlock Text="ms · estabilidade (jitter)" Style="{StaticResource TextoSuave}" FontSize="11"/>
+                    </StackPanel>
+                  </Border>
+                </UniformGrid>
+                <Border Style="{StaticResource EstiloCartao}">
+                  <StackPanel>
+                    <TextBlock Text="O que isso significa" Style="{StaticResource Titulo}" FontSize="14" Margin="0,0,0,8"/>
+                    <StackPanel x:Name="ListaAvaliacao">
+                      <TextBlock Style="{StaticResource TextoSuave}" FontSize="12.5"
+                                 Text="Clique em &quot;Iniciar teste&quot;. Leva uns 20 segundos. Evite baixar arquivos ou assistir vídeos durante o teste."/>
+                    </StackPanel>
+                  </StackPanel>
+                </Border>
+              </StackPanel>
+            </Grid>
+          </Grid>
+
           <!-- Página: Configurações -->
           <Grid x:Name="PaginaConfig" Visibility="Collapsed">
             <Grid.RowDefinitions>
@@ -1200,6 +1311,44 @@ $script:Xaml = @'
                   </Button>
                 </StackPanel>
               </Border>
+            </StackPanel>
+          </Grid>
+
+          <!-- Animação da otimização: lixeira recebendo arquivos (cobre a área de conteúdo) -->
+          <Grid x:Name="Overlay" Visibility="Collapsed" Margin="-22,-16,-22,-18" Background="#F20A101C">
+            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+              <Canvas x:Name="CanvasLixo" Width="360" Height="250">
+                <Ellipse Canvas.Left="122" Canvas.Top="236" Width="116" Height="12" Fill="#40000000"/>
+                <Grid x:Name="CorpoLixeira" Canvas.Left="130" Canvas.Top="118" Width="100" Height="122" RenderTransformOrigin="0.5,1">
+                  <Grid.RenderTransform><RotateTransform/></Grid.RenderTransform>
+                  <Path Data="M0,0 L100,0 L90,122 L10,122 Z">
+                    <Path.Fill>
+                      <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                        <GradientStop Color="#22C55E" Offset="0"/>
+                        <GradientStop Color="#15803D" Offset="1"/>
+                      </LinearGradientBrush>
+                    </Path.Fill>
+                  </Path>
+                  <Path Data="M30,20 L33,104 M50,20 L50,104 M70,20 L67,104" Stroke="#052E16" StrokeThickness="5"
+                        StrokeStartLineCap="Round" StrokeEndLineCap="Round" Opacity="0.35"/>
+                </Grid>
+                <Canvas x:Name="TampaLixeira" Canvas.Left="122" Canvas.Top="100">
+                  <Canvas.RenderTransform><RotateTransform CenterX="0" CenterY="18"/></Canvas.RenderTransform>
+                  <Border Canvas.Left="40" Canvas.Top="0" Width="36" Height="10" CornerRadius="5,5,0,0" Background="#16A34A"/>
+                  <Border Canvas.Left="0" Canvas.Top="8" Width="116" Height="12" CornerRadius="6" Background="#22C55E"/>
+                </Canvas>
+                <Grid x:Name="SeloConcluido" Canvas.Left="140" Canvas.Top="8" Width="80" Height="80" Opacity="0" RenderTransformOrigin="0.5,0.5">
+                  <Grid.RenderTransform><ScaleTransform ScaleX="0" ScaleY="0"/></Grid.RenderTransform>
+                  <Ellipse Fill="#22C55E"/>
+                  <TextBlock Text="&#xE73E;" FontFamily="Segoe MDL2 Assets" FontSize="38" Foreground="White"
+                             HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </Grid>
+              </Canvas>
+              <TextBlock x:Name="TxtAnimTitulo" Text="Otimizando..." FontSize="26" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,8,0,0"/>
+              <TextBlock x:Name="TxtAnimDetalhe" Text="Jogando fora o que não serve mais" Style="{StaticResource TextoSuave}"
+                         FontSize="13" HorizontalAlignment="Center" TextAlignment="Center" Margin="0,6,0,0"/>
+              <Button x:Name="BtnFecharAnim" Style="{StaticResource BotaoPrincipal}" Width="200" Margin="0,22,0,0"
+                      Content="Concluir" Visibility="Hidden"/>
             </StackPanel>
           </Grid>
         </Grid>
@@ -1323,7 +1472,7 @@ function Mostrar-Mensagem {
 
 function Mostrar-Pagina {
     param([string]$Nome)
-    foreach ($p in 'PaginaInicio', 'PaginaDiagnostico', 'PaginaHistorico', 'PaginaInicializacao', 'PaginaConfig') {
+    foreach ($p in 'PaginaInicio', 'PaginaDiagnostico', 'PaginaInternet', 'PaginaHistorico', 'PaginaInicializacao', 'PaginaConfig') {
         $script:UI[$p].Visibility = if ($p -eq $Nome) { 'Visible' } else { 'Collapsed' }
     }
     if ($Nome -eq 'PaginaHistorico') { Atualizar-Historico }
@@ -1386,7 +1535,7 @@ function Atualizar-Historico {
         $borda.Background = Pincel '#0F1828'; $borda.BorderBrush = Pincel '#1C2840'; $borda.BorderThickness = Espaco 1
         $borda.CornerRadius = New-Object System.Windows.CornerRadius(10); $borda.Padding = Espaco 12 10; $borda.Margin = Espaco 0 0 0 8
 
-        $icone = switch ($item.Tipo) { 'Otimizacao' { [char]0xE74D } 'Desfazer' { [char]0xE7A7 } default { [char]0xE74D } }
+        $icone = switch ($item.Tipo) { 'Otimizacao' { [char]0xE74D } 'Desfazer' { [char]0xE7A7 } 'Internet' { [char]0xE701 } default { [char]0xE74D } }
         $cor   = switch ($item.Tipo) { 'Otimizacao' { '#22C55E' } 'Desfazer' { '#FACC15' } default { '#4F9BFF' } }
         $ic = Novo-Texto ([string]$icone) 16 $cor 'Normal' 'Segoe MDL2 Assets'
         $ic.Width = 32
@@ -1547,6 +1696,7 @@ function Ao-Otimizar {
             return
         }
         Definir-Ocupado $true 'Otimizando...'
+        Iniciar-AnimacaoOtimizacao
         $acoesEscolhidas = @($resultado | ForEach-Object { $_.Acao })
         Iniciar-EmSegundoPlano -Parametros @{ Acoes = $acoesEscolhidas; ApagarBackup = $temBackup } -Trabalho {
             param($Acoes, $ApagarBackup)
@@ -1568,7 +1718,7 @@ function Ao-Otimizar {
             Atualizar-StatusBackup
             Escrever-Log ('Otimização concluída: {0} limpos.' -f (Formatar-Tamanho $bytes))
             $script:UI.TxtEstado.Text = '{0} limpos!' -f (Formatar-Tamanho $bytes)
-            [void](Mostrar-Mensagem ('Otimização concluída! {0} limpos.' -f (Formatar-Tamanho $bytes)))
+            Concluir-AnimacaoOtimizacao $bytes $erro
             Iniciar-Diagnostico
         }
     }
@@ -1660,11 +1810,349 @@ function Ao-Abrir {
     }
 }
 
+# ---- Teste de internet
+# Usa os servidores públicos de teste da Cloudflare (os mesmos de speed.cloudflare.com).
+# Roda em segundo plano e vai escrevendo o progresso numa tabela compartilhada.
+
+$script:ScriptTesteInternet = {
+    param($P)
+    $base = 'https://speed.cloudflare.com'
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    function Pedido([string]$Url, [string]$Metodo = 'GET') {
+        $r = [System.Net.HttpWebRequest]::Create($Url)
+        $r.Method = $Metodo; $r.UserAgent = 'OtimizadorPC'; $r.Timeout = 15000; $r.ReadWriteTimeout = 15000
+        if ($r.Proxy) { $r.Proxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials }
+        return $r
+    }
+    try {
+        try {
+            $wc = New-Object System.Net.WebClient
+            $wc.Headers['User-Agent'] = 'OtimizadorPC'
+            $wc.Encoding = [System.Text.Encoding]::UTF8
+            $meta = $wc.DownloadString("$base/meta") | ConvertFrom-Json
+            $P.Servidor = [string]$meta.city
+            $P.Provedor = [string]$meta.asOrganization
+        } catch { }
+
+        # Ping e oscilação: 11 pedidos vazios (o primeiro abre a conexão e é descartado)
+        $P.Fase = 'ping'
+        $tempos = @()
+        for ($i = 0; $i -lt 11; $i++) {
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            (Pedido "$base/__down?bytes=0").GetResponse().Close()
+            $sw.Stop()
+            if ($i -gt 0) { $tempos += $sw.Elapsed.TotalMilliseconds }
+        }
+        $ordenados = @($tempos | Sort-Object)
+        $P.Ping = [math]::Round($ordenados[[int][math]::Floor($ordenados.Count / 2)])
+        $diferencas = for ($i = 1; $i -lt $tempos.Count; $i++) { [math]::Abs($tempos[$i] - $tempos[$i - 1]) }
+        $P.Jitter = [math]::Round(($diferencas | Measure-Object -Average).Average)
+
+        # Download: até 8 s ou 100 MB; o primeiro segundo (aceleração da conexão) não entra na conta
+        $P.Fase = 'download'; $P.Mbps = 0
+        $buffer = New-Object byte[] 65536
+        $total = [long]0; $base1s = [long]-1
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($sw.Elapsed.TotalSeconds -lt 8 -and $total -lt 100MB) {
+            $resp = (Pedido "$base/__down?bytes=25000000").GetResponse()
+            $fluxo = $resp.GetResponseStream()
+            try {
+                while (($n = $fluxo.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                    $total += $n
+                    $t = $sw.Elapsed.TotalSeconds
+                    if ($base1s -lt 0 -and $t -ge 1) { $base1s = $total }
+                    if ($base1s -ge 0 -and $t -gt 1.2) { $P.Mbps = [math]::Round(($total - $base1s) * 8 / 1e6 / ($t - 1), 1) }
+                    elseif ($t -gt 0.2) { $P.Mbps = [math]::Round($total * 8 / 1e6 / $t, 1) }
+                    if ($t -ge 8 -or $total -ge 100MB) { break }
+                }
+            } finally { $fluxo.Close(); $resp.Close() }
+        }
+        $P.Download = $P.Mbps
+
+        # Upload: até 8 s ou 30 MB, em envios de 4 MB
+        $P.Fase = 'upload'; $P.Mbps = 0
+        $dados = New-Object byte[] 65536
+        (New-Object System.Random).NextBytes($dados)
+        $total = [long]0
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($sw.Elapsed.TotalSeconds -lt 8 -and $total -lt 30MB) {
+            $r = Pedido "$base/__up" 'POST'
+            $r.ContentType = 'application/octet-stream'
+            $r.ContentLength = 4MB
+            $r.AllowWriteStreamBuffering = $false
+            $fluxo = $r.GetRequestStream()
+            try {
+                for ($k = 0; $k -lt 64; $k++) {
+                    $fluxo.Write($dados, 0, $dados.Length)
+                    $total += $dados.Length
+                    $t = $sw.Elapsed.TotalSeconds
+                    if ($t -gt 0.2) { $P.Mbps = [math]::Round($total * 8 / 1e6 / $t, 1) }
+                }
+            } finally { $fluxo.Close() }
+            $r.GetResponse().Close()
+        }
+        $P.Upload = [math]::Round($total * 8 / 1e6 / $sw.Elapsed.TotalSeconds, 1)
+        $P.Fase = 'fim'
+    } catch {
+        $P.Erro = $_.Exception.Message
+        $P.Fase = 'erro'
+    }
+}
+
+function Definir-ArcoVelocimetro {
+    # Meio círculo da esquerda para a direita (passando pelo topo), preenchido até $Fracao (0 a 1).
+    param($Caminho, [double]$Fracao)
+    $cx = 130; $cy = 135; $r = 110
+    $f = [math]::Max(0.001, [math]::Min(1, $Fracao))
+    $angulo = [math]::PI * (1 - $f)
+    $figura = New-Object System.Windows.Media.PathFigure
+    $figura.StartPoint = New-Object System.Windows.Point(($cx - $r), $cy)
+    $fim = New-Object System.Windows.Point(($cx + $r * [math]::Cos($angulo)), ($cy - $r * [math]::Sin($angulo)))
+    $arco = New-Object System.Windows.Media.ArcSegment($fim, (New-Object System.Windows.Size($r, $r)), 0, $false,
+        [System.Windows.Media.SweepDirection]::Clockwise, $true)
+    $figura.Segments.Add($arco)
+    $geometria = New-Object System.Windows.Media.PathGeometry
+    $geometria.Figures.Add($figura)
+    $Caminho.Data = $geometria
+}
+
+function Definir-Velocimetro {
+    param([double]$Mbps)
+    # Escala logarítmica: 1 Mbps já aparece e 1000 Mbps enche o arco
+    $fracao = [math]::Log10(1 + $Mbps) / [math]::Log10(1001)
+    Definir-ArcoVelocimetro $script:UI.ArcoInternet $fracao
+    $script:UI.TxtVelocidade.Text = Formatar-Mbps $Mbps
+}
+
+function Formatar-Mbps {
+    param([double]$Valor)
+    if ($Valor -ge 100) { return '{0:N0}' -f $Valor }
+    return '{0:N1}' -f $Valor
+}
+
+function Avaliar-Internet {
+    param($P)
+    $linhas = @()
+    $d = [double]$P.Download; $u = [double]$P.Upload; $ping = [double]$P.Ping; $jit = [double]$P.Jitter
+    $dTxt = Formatar-Mbps $d; $uTxt = Formatar-Mbps $u
+    if ($d -lt 5) { $linhas += @('#EF4444', "Download lento ($dTxt Mbps): sites e vídeos podem travar.") }
+    elseif ($d -lt 25) { $linhas += @('#FACC15', "Download razoável ($dTxt Mbps): dá para o dia a dia, mas vídeos em alta qualidade podem travar.") }
+    else { $linhas += @('#22C55E', "Download bom ($dTxt Mbps): sites, CRM e vídeos devem abrir sem problema.") }
+
+    if ($u -ge 1.5 -and $ping -lt 100 -and $jit -lt 30) {
+        $linhas += @('#22C55E', 'Chamadas de áudio e vídeo (WhatsApp, Meet, Teams): boas condições.')
+    } else {
+        $motivos = @()
+        if ($u -lt 1.5) { $motivos += "upload baixo ($uTxt Mbps)" }
+        if ($ping -ge 100) { $motivos += "ping alto ($ping ms)" }
+        if ($jit -ge 30) { $motivos += "conexão instável ($jit ms de oscilação)" }
+        $linhas += @('#FACC15', "Chamadas de áudio e vídeo podem picotar: $($motivos -join ', ').")
+        $linhas += @('#8A97AD', 'Dica: se estiver no Wi-Fi, chegue mais perto do roteador ou use cabo de rede.')
+    }
+    return ,$linhas
+}
+
+function Ao-TestarInternet {
+    if ($script:TesteInternet) { return }
+    $p = [hashtable]::Synchronized(@{ Fase = 'inicio'; Mbps = 0; Download = 0; Upload = 0; Ping = 0; Jitter = 0; Erro = $null; Servidor = ''; Provedor = '' })
+    $script:TesteInternet = $p
+    foreach ($nome in 'TxtDownload', 'TxtUpload', 'TxtPing', 'TxtJitter') { $script:UI[$nome].Text = '--' }
+    $script:UI.BtnTestarInternet.IsEnabled = $false
+    $script:UI.TxtBtnTestar.Text = 'Testando...'
+    $script:UI.TxtFaseTeste.Text = 'Conectando...'
+    $script:UI.ListaAvaliacao.Children.Clear()
+    $script:UI.ListaAvaliacao.Children.Add((Novo-Texto 'Aguarde uns 20 segundos...' 12.5 '#8A97AD')) | Out-Null
+    Definir-Velocimetro 0
+    Iniciar-EmSegundoPlano -Trabalho $script:ScriptTesteInternet -Parametros @{ P = $p } -AoConcluir {
+        param($resultado, $erro)
+        $p = $script:TesteInternet
+        $script:TesteInternet = $null
+        $script:UI.BtnTestarInternet.IsEnabled = $true
+        $script:UI.TxtBtnTestar.Text = 'Testar de novo'
+        $script:UI.ListaAvaliacao.Children.Clear()
+        if ($p.Fase -ne 'fim') {
+            $script:UI.TxtFaseTeste.Text = 'Não foi possível testar'
+            Definir-Velocimetro 0
+            $script:UI.ListaAvaliacao.Children.Add((Novo-Texto 'Sem internet ou o servidor de teste está bloqueado na rede.' 12.5 '#EF4444')) | Out-Null
+            return
+        }
+        Atualizar-TesteInternet $p
+        $script:UI.TxtFaseTeste.Text = 'Teste concluído'
+        Definir-Velocimetro $p.Download
+        $avaliacao = Avaliar-Internet $p
+        for ($i = 0; $i -lt $avaliacao.Count; $i += 2) {
+            $linha = Novo-Texto ("• " + $avaliacao[$i + 1]) 12.5 $avaliacao[$i]
+            $linha.Margin = Espaco 0 0 0 6
+            $script:UI.ListaAvaliacao.Children.Add($linha) | Out-Null
+        }
+        $resumo = 'Teste de internet: {0} Mbps download, {1} Mbps upload, ping {2} ms' -f (Formatar-Mbps $p.Download), (Formatar-Mbps $p.Upload), $p.Ping
+        Adicionar-Historico 'Internet' $resumo
+        Escrever-Log "$resumo."
+    }
+}
+
+function Atualizar-TesteInternet {
+    param($P)
+    $fases = @{ inicio = 'Conectando...'; ping = 'Medindo o ping...'; download = 'Testando download...'; upload = 'Testando upload...'; fim = 'Teste concluído' }
+    if ($fases.ContainsKey([string]$P.Fase)) { $script:UI.TxtFaseTeste.Text = $fases[[string]$P.Fase] }
+    if ($P.Fase -in 'download', 'upload') { Definir-Velocimetro ([double]$P.Mbps) }
+    if ($P.Ping) { $script:UI.TxtPing.Text = [string]$P.Ping; $script:UI.TxtJitter.Text = [string]$P.Jitter }
+    if ($P.Download) { $script:UI.TxtDownload.Text = Formatar-Mbps $P.Download }
+    if ($P.Upload) { $script:UI.TxtUpload.Text = Formatar-Mbps $P.Upload }
+    if ($P.Servidor -or $P.Provedor) {
+        $partes = @('Servidor de teste: Cloudflare')
+        if ($P.Servidor) { $partes[0] += " ($($P.Servidor))" }
+        if ($P.Provedor) { $partes += "Provedor: $($P.Provedor)" }
+        $script:UI.TxtServidorTeste.Text = $partes -join "`r`n"
+    }
+}
+
+# ---- Animação da otimização (lixeira recebendo arquivos)
+
+function Nova-AnimacaoQuadros {
+    # Animação por quadros-chave: $Quadros = lista de @(segundos, valor[, suavização])
+    param([object[]]$Quadros, [double]$Duracao, [double]$Inicio = 0, [switch]$Repetir)
+    $a = New-Object System.Windows.Media.Animation.DoubleAnimationUsingKeyFrames
+    $a.Duration = New-Object System.Windows.Duration([TimeSpan]::FromSeconds($Duracao))
+    $a.BeginTime = [TimeSpan]::FromSeconds($Inicio)
+    if ($Repetir) { $a.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever }
+    foreach ($q in $Quadros) {
+        $k = New-Object System.Windows.Media.Animation.EasingDoubleKeyFrame([double]$q[1], [System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromSeconds($q[0])))
+        if ($q.Count -gt 2) { $k.EasingFunction = $q[2] }
+        [void]$a.KeyFrames.Add($k)   # Add devolve a posição; sem [void] ela iria junto no retorno
+    }
+    return $a
+}
+
+function Iniciar-AnimacaoOtimizacao {
+    $ui = $script:UI
+    $script:AnimInicio = Get-Date
+    $ui.TxtAnimTitulo.Text = 'Otimizando...'
+    $ui.TxtAnimDetalhe.Text = 'Jogando fora o que não serve mais'
+    $ui.BtnFecharAnim.Visibility = 'Hidden'
+    # Limpa o que sobrou da animação anterior (animações "seguram" o último valor)
+    $ui.SeloConcluido.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $null)
+    $ui.SeloConcluido.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $null)
+    $ui.SeloConcluido.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $null)
+    $ui.CorpoLixeira.RenderTransform.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $null)
+    $ui.SeloConcluido.Opacity = 0
+    $ui.SeloConcluido.RenderTransform.ScaleX = 0; $ui.SeloConcluido.RenderTransform.ScaleY = 0
+    $ui.Overlay.Opacity = 0
+    $ui.Overlay.Visibility = 'Visible'
+    $ui.Overlay.BeginAnimation([System.Windows.UIElement]::OpacityProperty,
+        (New-Object System.Windows.Media.Animation.DoubleAnimation(0, 1, (New-Object System.Windows.Duration([TimeSpan]::FromSeconds(0.25))))))
+
+    # Tampa aberta, balançando
+    $ui.TampaLixeira.RenderTransform.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty,
+        (Nova-AnimacaoQuadros @(@(0, 0), @(0.2, -38), @(0.45, -28), @(0.7, -38)) 0.7 0 -Repetir))
+
+    # Arquivos voando para dentro da lixeira, um atrás do outro
+    foreach ($a in @($script:ArquivosAnim)) { $ui.CanvasLixo.Children.Remove($a) }
+    $script:ArquivosAnim = @()
+    $origens = @(@(10, 150, '#4F9BFF', 0xE8A5), @(300, 140, '#FACC15', 0xE7C3), @(40, 20, '#EA4335', 0xE8A5),
+                 @(290, 10, '#A78BFA', 0xE7C3), @(150, -10, '#22C55E', 0xE8A5))
+    $suave = New-Object System.Windows.Media.Animation.QuadraticEase
+    $suave.EasingMode = 'EaseIn'
+    $i = 0
+    foreach ($o in $origens) {
+        $arq = Novo-Texto ([string][char]$o[3]) 30 $o[2] 'Normal' 'Segoe MDL2 Assets'
+        [System.Windows.Controls.Canvas]::SetLeft($arq, $o[0]); [System.Windows.Controls.Canvas]::SetTop($arq, $o[1])
+        $arq.RenderTransformOrigin = New-Object System.Windows.Point(0.5, 0.5)
+        $escala = New-Object System.Windows.Media.ScaleTransform
+        $giro = New-Object System.Windows.Media.RotateTransform
+        $mov = New-Object System.Windows.Media.TranslateTransform
+        $grupo = New-Object System.Windows.Media.TransformGroup
+        $grupo.Children.Add($escala); $grupo.Children.Add($giro); $grupo.Children.Add($mov)
+        $arq.RenderTransform = $grupo
+        $arq.Opacity = 0
+        $ui.CanvasLixo.Children.Add($arq) | Out-Null
+        $script:ArquivosAnim += $arq
+
+        # Destino: boca da lixeira (165, 100); sobe um pouco antes de cair (arco)
+        $dx = 165 - $o[0]; $dy = 100 - $o[1]
+        $dur = 1.4; $atraso = $i * 0.28
+        $mov.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, (Nova-AnimacaoQuadros @(@(0, 0), @(1.1, $dx), @(1.4, $dx)) $dur $atraso -Repetir))
+        $mov.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty, (Nova-AnimacaoQuadros @(@(0, 0), @(0.45, ([math]::Min(0, $dy) - 45)), @(1.1, $dy, $suave), @(1.4, ($dy + 30))) $dur $atraso -Repetir))
+        $giro.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, (Nova-AnimacaoQuadros @(@(0, 0), @(1.4, 260)) $dur $atraso -Repetir))
+        $escala.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, (Nova-AnimacaoQuadros @(@(0, 1), @(1.1, 0.7), @(1.4, 0.3)) $dur $atraso -Repetir))
+        $escala.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, (Nova-AnimacaoQuadros @(@(0, 1), @(1.1, 0.7), @(1.4, 0.3)) $dur $atraso -Repetir))
+        $arq.BeginAnimation([System.Windows.UIElement]::OpacityProperty, (Nova-AnimacaoQuadros @(@(0, 0), @(0.15, 1), @(1.1, 1), @(1.3, 0), @(1.4, 0)) $dur $atraso -Repetir))
+        $i++
+    }
+}
+
+function Concluir-AnimacaoOtimizacao {
+    param([long]$Bytes, [string]$Erro)
+    # Garante pelo menos 2,5 s de animação, mesmo se a limpeza for rápida
+    $falta = 2.5 - ((Get-Date) - $script:AnimInicio).TotalSeconds
+    if ($falta -gt 0) {
+        $script:AnimPendente = @{ Bytes = $Bytes; Erro = $Erro }
+        $t = New-Object System.Windows.Threading.DispatcherTimer
+        $t.Interval = [TimeSpan]::FromSeconds($falta)
+        $t.Add_Tick({ param($s) $s.Stop(); Concluir-AnimacaoOtimizacao $script:AnimPendente.Bytes $script:AnimPendente.Erro })
+        $t.Start()
+        return
+    }
+    $ui = $script:UI
+    foreach ($a in @($script:ArquivosAnim)) {
+        $a.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $null)
+        $a.Opacity = 0
+    }
+
+    # Tampa fecha com um quique e a lixeira balança
+    $quique = New-Object System.Windows.Media.Animation.BounceEase
+    $quique.Bounces = 2; $quique.Bounciness = 3
+    $ui.TampaLixeira.RenderTransform.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty,
+        (Nova-AnimacaoQuadros @(@(0, -38), @(0.5, 0, $quique)) 0.5))
+    $ui.CorpoLixeira.RenderTransform.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty,
+        (Nova-AnimacaoQuadros @(@(0, 0), @(0.1, -5), @(0.2, 5), @(0.3, -3), @(0.4, 3), @(0.5, 0)) 0.5 0.35))
+
+    # Selo de concluído aparece crescendo
+    $volta = New-Object System.Windows.Media.Animation.BackEase
+    $volta.Amplitude = 0.5; $volta.EasingMode = 'EaseOut'
+    $ui.SeloConcluido.BeginAnimation([System.Windows.UIElement]::OpacityProperty, (Nova-AnimacaoQuadros @(@(0, 0), @(0.2, 1)) 0.2 0.5))
+    foreach ($prop in [System.Windows.Media.ScaleTransform]::ScaleXProperty, [System.Windows.Media.ScaleTransform]::ScaleYProperty) {
+        $ui.SeloConcluido.RenderTransform.BeginAnimation($prop, (Nova-AnimacaoQuadros @(@(0, 0), @(0.45, 1, $volta)) 0.45 0.5))
+    }
+
+    if ($Erro) {
+        $ui.TxtAnimTitulo.Text = 'Concluído com avisos'
+        $ui.TxtAnimDetalhe.Text = 'Veja os detalhes no registro.'
+    } else {
+        # Contagem subindo até o total limpo
+        $script:AnimContagem = @{ Alvo = $Bytes; Passo = 0 }
+        $ui.TxtAnimDetalhe.Text = 'Seu PC está mais leve. Tudo pode ser desfeito com "Desfazer".'
+        $t = New-Object System.Windows.Threading.DispatcherTimer
+        $t.Interval = [TimeSpan]::FromMilliseconds(30)
+        $t.Add_Tick({
+            param($s)
+            $c = $script:AnimContagem
+            $c.Passo++
+            $fracao = [math]::Min(1, $c.Passo / 30)
+            $script:UI.TxtAnimTitulo.Text = '{0} limpos!' -f (Formatar-Tamanho ($c.Alvo * (1 - [math]::Pow(1 - $fracao, 3))))
+            if ($fracao -ge 1) { $s.Stop() }
+        })
+        $t.Start()
+    }
+    $ui.BtnFecharAnim.Visibility = 'Visible'
+}
+
+function Fechar-AnimacaoOtimizacao {
+    $ui = $script:UI
+    $ui.TampaLixeira.RenderTransform.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $null)
+    $sumir = New-Object System.Windows.Media.Animation.DoubleAnimation(1, 0, (New-Object System.Windows.Duration([TimeSpan]::FromSeconds(0.2))))
+    $sumir.Add_Completed({ $script:UI.Overlay.Visibility = 'Collapsed' })
+    $ui.Overlay.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $sumir)
+}
+
 function Criar-Janela {
     $janela = [System.Windows.Markup.XamlReader]::Parse($script:Xaml)
     $script:UI.Janela = $janela
     $nomes = 'BarraTitulo', 'TxtVersao', 'BtnAtualizar', 'TxtBtnAtualizar', 'BtnMinimizar', 'BtnFechar',
-             'PontoSaude', 'TxtSaudeLateral', 'NavInicio', 'NavDiagnostico', 'NavHistorico', 'NavInicializacao', 'NavConfig',
+             'PontoSaude', 'TxtSaudeLateral', 'NavInicio', 'NavDiagnostico', 'NavInternet', 'NavHistorico', 'NavInicializacao', 'NavConfig',
+             'PaginaInternet', 'ArcoFundoInternet', 'ArcoInternet', 'TxtVelocidade', 'TxtFaseTeste', 'BtnTestarInternet', 'TxtBtnTestar',
+             'TxtServidorTeste', 'TxtDownload', 'TxtUpload', 'TxtPing', 'TxtJitter', 'ListaAvaliacao',
+             'Overlay', 'CanvasLixo', 'CorpoLixeira', 'TampaLixeira', 'SeloConcluido', 'TxtAnimTitulo', 'TxtAnimDetalhe', 'BtnFecharAnim',
              'PaginaInicio', 'PaginaDiagnostico', 'PaginaHistorico', 'PaginaInicializacao', 'PaginaConfig',
              'ListaAcoes', 'BtnLimparLog', 'TxtLog', 'AnelInicio', 'TxtNotaInicio', 'TxtEstado', 'TxtSelecionadas', 'BtnExplicar',
              'BarraProgresso', 'BtnOtimizar', 'BtnAnalisar', 'ListaStatus', 'BtnVerHistorico', 'TxtUltimaLimpeza',
@@ -1699,6 +2187,8 @@ function Criar-Janela {
     Criar-ListaStatus
     Definir-Anel $script:UI.AnelInicio 0.5 84 8
     Definir-Anel $script:UI.AnelDiag 0.5 150 12
+    Definir-ArcoVelocimetro $script:UI.ArcoFundoInternet 1
+    Definir-Velocimetro 0
 
     # Janela
     $script:UI.BarraTitulo.Add_MouseLeftButtonDown({ $script:UI.Janela.DragMove() })
@@ -1715,6 +2205,7 @@ function Criar-Janela {
     # Menu
     $script:UI.NavInicio.Add_Checked({ Mostrar-Pagina 'PaginaInicio' })
     $script:UI.NavDiagnostico.Add_Checked({ Mostrar-Pagina 'PaginaDiagnostico' })
+    $script:UI.NavInternet.Add_Checked({ Mostrar-Pagina 'PaginaInternet' })
     $script:UI.NavHistorico.Add_Checked({ Mostrar-Pagina 'PaginaHistorico' })
     $script:UI.NavInicializacao.Add_Checked({ Mostrar-Pagina 'PaginaInicializacao' })
     $script:UI.NavConfig.Add_Checked({ Mostrar-Pagina 'PaginaConfig' })
@@ -1732,6 +2223,8 @@ function Criar-Janela {
     $script:UI.BtnAtualizar.Add_Click({ Ao-Atualizar })
     $script:UI.BtnProcurarAtualizacao.Add_Click({ Iniciar-VerificacaoAtualizacao -Manual })
     $script:UI.BtnNovidades.Add_Click({ Ao-VerNovidades })
+    $script:UI.BtnTestarInternet.Add_Click({ Ao-TestarInternet })
+    $script:UI.BtnFecharAnim.Add_Click({ Fechar-AnimacaoOtimizacao })
 
     # Timers: tarefas/registro (rápido) e status do sistema (a cada 3 s)
     $timer = New-Object System.Windows.Threading.DispatcherTimer
