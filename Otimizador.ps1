@@ -2526,8 +2526,9 @@ $script:ScriptTesteInternet = {
         }
         $ordenados = @($tempos | Sort-Object)
         $P.Ping = [math]::Round($ordenados[[int][math]::Floor($ordenados.Count / 2)])
-        $diferencas = for ($i = 1; $i -lt $tempos.Count; $i++) { [math]::Abs($tempos[$i] - $tempos[$i - 1]) }
-        $P.Jitter = [math]::Round(($diferencas | Measure-Object -Average).Average)
+        # Oscilação = mediana das diferenças entre pings seguidos (um pico isolado não distorce o resultado)
+        $diferencas = @(for ($i = 1; $i -lt $tempos.Count; $i++) { [math]::Abs($tempos[$i] - $tempos[$i - 1]) }) | Sort-Object
+        $P.Jitter = [math]::Round(@($diferencas)[[int][math]::Floor(@($diferencas).Count / 2)])
 
         # Download: até 8 s ou 100 MB; o primeiro segundo (aceleração da conexão) não entra na conta
         $P.Fase = 'download'; $P.Mbps = 0
