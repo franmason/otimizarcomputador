@@ -80,7 +80,8 @@ function Formatar-Tamanho {
 
 function Escrever-Log {
     param([string]$Texto)
-    if ($script:FilaLog) { [void]$script:FilaLog.Add(('[{0:HH:mm:ss}] {1}' -f (Get-Date), $Texto)) }
+    # $null -ne: uma lista vazia conta como "falso" no PowerShell
+    if ($null -ne $script:FilaLog) { [void]$script:FilaLog.Add(('[{0:HH:mm:ss}] {1}' -f (Get-Date), $Texto)) }
 }
 
 function Test-PontoDeReanalise {

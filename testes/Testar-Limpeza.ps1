@@ -96,6 +96,11 @@ $graficos = $script:Acoes | Where-Object { $_.Id -eq 'Graficos' }
 Confere 'cache de gráficos aponta para D3DSCache' (@($graficos.Caminhos) -contains (Join-Path $env:LOCALAPPDATA 'D3DSCache'))
 Confere 'toda ação tem explicação' (-not ($script:Acoes | Where-Object { -not $_.Explicacao }))
 
+Write-Output '8) Registro'
+$script:FilaLog.Clear()
+Escrever-Log 'linha de teste'
+Confere 'Escrever-Log põe a linha na fila (mesmo com a fila vazia)' ($script:FilaLog.Count -eq 1 -and $script:FilaLog[0] -like '*linha de teste')
+
 Remover-PastaSegura $Base
 Confere 'pasta de teste apagada' (-not (Test-Path $Base))
 Write-Output "RESULTADO: $falhas falha(s)"
