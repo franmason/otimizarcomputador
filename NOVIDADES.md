@@ -5,7 +5,7 @@ O `Gerar-EXE.ps1` usa a seção da versão que está sendo gerada: ela aparece p
 antes de atualizar, depois de atualizar e na página de Releases do GitHub.
 Escreva para quem usa o app, em frases curtas.
 
-## 1.1.0
+## 1.2.0
 - Visual novo, com tema escuro e menu lateral.
 - Nota de saúde do PC (0 a 100) com dicas do que melhorar.
 - Status do sistema ao vivo: processador, memória, disco e internet.
@@ -17,6 +17,8 @@ Escreva para quem usa o app, em frases curtas.
 - Link "O que será feito?" explica cada ação em palavras simples (e ao passar o mouse).
 - Nova aba "Teste de internet": mede download, upload, ping e oscilação e diz se dá para fazer chamadas.
 - Animação da lixeira enquanto o PC é otimizado.
+- Velocímetro com ponteiro no teste de internet.
+- A nota de saúde agora considera o lixo acumulado e a última limpeza (sobe depois de otimizar), e o Diagnóstico mostra o motivo de cada ponto perdido.
 
 ## 1.0.0
 - Primeira versão.

@@ -41,7 +41,7 @@ Add-Type -AssemblyName WindowsBase
 # ------------------------------------------------------------------ Configuração
 
 $script:NomeApp          = 'Otimizador de PC'
-$script:Versao           = '1.1.0'
+$script:Versao           = '1.2.0'
 $script:NotasVersao     = ''   # preenchido pelo Gerar-EXE.ps1 com a seção desta versão do NOVIDADES.md
 $script:PastaInstalacao  = Join-Path $env:LOCALAPPDATA 'Programs\OtimizadorPC'
 $script:ExeInstalado     = Join-Path $script:PastaInstalacao 'Otimizador.exe'
@@ -434,20 +434,39 @@ function Obter-PrefixosNavegadoresAbertos {
 
 function Calcular-NotaSaude {
     # Nota de 0 a 100: começa em 100 e perde pontos por cada problema encontrado.
+    # Devolve a nota e a lista de descontos (para explicar "por que essa nota").
     param($Diag)
-    $nota = 100
-    if ($Diag.RamUsoPct -ge 90) { $nota -= 25 } elseif ($Diag.RamUsoPct -ge 80) { $nota -= 15 } elseif ($Diag.RamUsoPct -ge 70) { $nota -= 5 }
-    if ($Diag.RamTotalGB -gt 0 -and $Diag.RamTotalGB -le 4.5) { $nota -= 20 } elseif ($Diag.RamTotalGB -gt 0 -and $Diag.RamTotalGB -le 8.5) { $nota -= 10 }
-    if ($Diag.TemHDD) { $nota -= 20 }
+    $descontos = New-Object 'System.Collections.Generic.List[object]'
+    function Descontar([int]$Pontos, [string]$Motivo) { $descontos.Add([pscustomobject]@{ Pontos = $Pontos; Motivo = $Motivo }) }
+
+    if ($Diag.RamUsoPct -ge 90) { Descontar 25 "Memória em uso muito alta ($($Diag.RamUsoPct)%)" }
+    elseif ($Diag.RamUsoPct -ge 80) { Descontar 15 "Memória em uso alta ($($Diag.RamUsoPct)%)" }
+    elseif ($Diag.RamUsoPct -ge 70) { Descontar 5 "Memória em uso um pouco alta ($($Diag.RamUsoPct)%)" }
+    if ($Diag.RamTotalGB -gt 0 -and $Diag.RamTotalGB -le 4.5) { Descontar 20 "Pouca memória instalada ($($Diag.RamTotalGB) GB)" }
+    elseif ($Diag.RamTotalGB -gt 0 -and $Diag.RamTotalGB -le 8.5) { Descontar 10 "Memória instalada justa ($($Diag.RamTotalGB) GB)" }
+    if ($Diag.TemHDD) { Descontar 20 'Disco HDD (mais lento que SSD)' }
     if ($Diag.CLivrePct -ge 0) {
-        if ($Diag.CLivrePct -lt 8) { $nota -= 25 } elseif ($Diag.CLivrePct -lt 15) { $nota -= 15 } elseif ($Diag.CLivrePct -lt 25) { $nota -= 5 }
+        if ($Diag.CLivrePct -lt 8) { Descontar 25 "Disco C: quase cheio ($($Diag.CLivrePct)% livre)" }
+        elseif ($Diag.CLivrePct -lt 15) { Descontar 15 "Pouco espaço no C: ($($Diag.CLivrePct)% livre)" }
+        elseif ($Diag.CLivrePct -lt 25) { Descontar 5 "Espaço no C: ficando curto ($($Diag.CLivrePct)% livre)" }
     }
-    return [math]::Max(0, [math]::Min(100, $nota))
+    # O que a limpeza resolve: lixo acumulado e tempo sem limpar
+    if ($Diag.LixoBytes -ge 2GB) { Descontar 15 "Muito lixo acumulado ($(Formatar-Tamanho $Diag.LixoBytes) para limpar)" }
+    elseif ($Diag.LixoBytes -ge 1GB) { Descontar 10 "Lixo acumulado ($(Formatar-Tamanho $Diag.LixoBytes) para limpar)" }
+    elseif ($Diag.LixoBytes -ge 300MB) { Descontar 5 "Um pouco de lixo acumulado ($(Formatar-Tamanho $Diag.LixoBytes) para limpar)" }
+    if ($Diag.DiasDesdeLimpeza -lt 0) { Descontar 5 'Nenhuma limpeza feita ainda neste PC' }
+    elseif ($Diag.DiasDesdeLimpeza -gt 14) { Descontar 5 "Última limpeza há $($Diag.DiasDesdeLimpeza) dias" }
+
+    $total = ($descontos | Measure-Object -Property Pontos -Sum).Sum
+    return [pscustomobject]@{ Nota = [int][math]::Max(0, [math]::Min(100, 100 - $total)); Descontos = $descontos }
 }
 
 function Obter-Diagnostico {
+    # $DiasDesdeLimpeza: -1 = nunca limpou (vem do histórico, que fica na thread da janela)
+    param([int]$DiasDesdeLimpeza = -1)
     $d = [pscustomobject]@{
         Modelo = ''; Processador = ''; RamTotalGB = 0; RamUsoPct = 0; TemHDD = $false; CLivrePct = -1
+        LixoBytes = [long]0; DiasDesdeLimpeza = $DiasDesdeLimpeza; Descontos = @()
         Linhas = (New-Object 'System.Collections.Generic.List[string]')
         Dicas  = (New-Object 'System.Collections.Generic.List[string]')
         Nota = 0
@@ -523,7 +542,17 @@ function Obter-Diagnostico {
     $chrome = $grupos | Where-Object { $_.Nome -eq 'chrome' }
     if ($chrome -and $chrome.Bytes -gt 1.5GB) { $d.Dicas.Add('O Chrome está usando muita memória. Feche abas que não estiver usando.') }
 
-    $d.Nota = Calcular-NotaSaude $d
+    # Quanto dá para limpar agora (só contagem, nada é alterado)
+    foreach ($acao in $script:Acoes) {
+        if ($acao.Tipo -eq 'Pasta') { $d.LixoBytes += (Analisar-Acao $acao).Bytes }
+    }
+    $l.Add('')
+    $l.Add(('Para limpar:  {0} em arquivos temporários e cache' -f (Formatar-Tamanho $d.LixoBytes)))
+    if ($d.LixoBytes -ge 300MB) { $d.Dicas.Insert(0, ('Há {0} de arquivos temporários e cache para limpar. Clique em Otimizar.' -f (Formatar-Tamanho $d.LixoBytes))) }
+
+    $resultadoNota = Calcular-NotaSaude $d
+    $d.Nota = $resultadoNota.Nota
+    $d.Descontos = @($resultadoNota.Descontos)
     if ($d.Dicas.Count -eq 0) { $d.Dicas.Add('Nenhum problema encontrado. Continue fazendo a limpeza de vez em quando.') }
     return $d
 }
@@ -1093,7 +1122,9 @@ $script:Xaml = @'
                     </StackPanel>
                   </Grid>
                   <TextBlock x:Name="TxtRotuloDiag" Text="Analisando..." FontSize="17" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,12,0,0"/>
-                  <TextBlock Text="Dicas" Style="{StaticResource Titulo}" FontSize="14" Margin="0,18,0,8"/>
+                  <TextBlock Text="Por que essa nota" Style="{StaticResource Titulo}" FontSize="14" Margin="0,16,0,8"/>
+                  <StackPanel x:Name="ListaDescontos"/>
+                  <TextBlock Text="Dicas" Style="{StaticResource Titulo}" FontSize="14" Margin="0,14,0,8"/>
                   <StackPanel x:Name="ListaDicas"/>
                 </StackPanel>
               </Border>
@@ -1173,21 +1204,26 @@ $script:Xaml = @'
               </Grid.ColumnDefinitions>
               <Border Style="{StaticResource EstiloCartao}" Padding="20" VerticalAlignment="Top">
                 <StackPanel>
-                  <Grid Width="260" Height="150" HorizontalAlignment="Center">
+                  <!-- Velocímetro: arco de 240°, marcas, ponteiro e valor no centro (desenhado em Montar-Velocimetro) -->
+                  <Canvas Width="290" Height="215" HorizontalAlignment="Center">
                     <Path x:Name="ArcoFundoInternet" Stroke="#1F2C45" StrokeThickness="14" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
-                    <Path x:Name="ArcoInternet" StrokeThickness="14" StrokeStartLineCap="Round" StrokeEndLineCap="Round">
-                      <Path.Stroke>
-                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
-                          <GradientStop Color="#3B82F6" Offset="0"/>
-                          <GradientStop Color="#22C55E" Offset="1"/>
+                    <Path x:Name="ArcoInternet" StrokeThickness="14" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                    <Canvas x:Name="MarcasVelocimetro"/>
+                    <Path x:Name="Ponteiro" Data="M140,135 L145,42 L150,135 Z">
+                      <Path.Fill>
+                        <LinearGradientBrush StartPoint="0,1" EndPoint="0,0">
+                          <GradientStop Color="#8A97AD" Offset="0"/>
+                          <GradientStop Color="#FFFFFF" Offset="1"/>
                         </LinearGradientBrush>
-                      </Path.Stroke>
+                      </Path.Fill>
+                      <Path.RenderTransform><RotateTransform CenterX="145" CenterY="135" Angle="-120"/></Path.RenderTransform>
                     </Path>
-                    <StackPanel VerticalAlignment="Bottom" HorizontalAlignment="Center" Margin="0,0,0,8">
-                      <TextBlock x:Name="TxtVelocidade" Text="0" FontSize="40" FontWeight="Bold" HorizontalAlignment="Center"/>
-                      <TextBlock Text="Mbps" Style="{StaticResource TextoSuave}" FontSize="13" HorizontalAlignment="Center"/>
+                    <Ellipse Canvas.Left="133" Canvas.Top="123" Width="24" Height="24" Fill="#111A2B" Stroke="#FFFFFF" StrokeThickness="3"/>
+                    <StackPanel Canvas.Left="70" Canvas.Top="152" Width="150">
+                      <TextBlock x:Name="TxtVelocidade" Text="0" FontSize="34" FontWeight="Bold" HorizontalAlignment="Center"/>
+                      <TextBlock x:Name="TxtUnidadeFase" Text="Mbps" Style="{StaticResource TextoSuave}" FontSize="12" HorizontalAlignment="Center"/>
                     </StackPanel>
-                  </Grid>
+                  </Canvas>
                   <TextBlock x:Name="TxtFaseTeste" Text="Pronto para testar" FontSize="15" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,14,0,0"/>
                   <Button x:Name="BtnTestarInternet" Style="{StaticResource BotaoPrincipal}" Margin="0,16,0,0">
                     <StackPanel Orientation="Horizontal">
@@ -1572,6 +1608,24 @@ function Atualizar-Saude {
     $script:UI.PontoSaude.Fill = Pincel $cor.Cor
     $script:UI.TxtDiagnostico.Text = ($Diag.Linhas -join "`r`n")
 
+    # Por que essa nota: cada ponto perdido e o motivo
+    $script:UI.ListaDescontos.Children.Clear()
+    if (@($Diag.Descontos).Count -eq 0) {
+        $script:UI.ListaDescontos.Children.Add((Novo-Texto 'Nenhum ponto perdido. Tudo certo!' 12.5 '#22C55E')) | Out-Null
+    }
+    foreach ($desc in $Diag.Descontos) {
+        $linha = New-Object System.Windows.Controls.DockPanel
+        $linha.Margin = Espaco 0 0 0 5
+        $pontos = Novo-Texto ("−$($desc.Pontos)") 12.5 '#EF4444' 'SemiBold'
+        $pontos.Width = 34; $pontos.VerticalAlignment = 'Top'
+        [System.Windows.Controls.DockPanel]::SetDock($pontos, 'Left')
+        $linha.Children.Add($pontos) | Out-Null
+        $linha.Children.Add((Novo-Texto $desc.Motivo 12.5 '#C9D4E5')) | Out-Null
+        $script:UI.ListaDescontos.Children.Add($linha) | Out-Null
+    }
+    $explicacao = if (@($Diag.Descontos).Count) { (@($Diag.Descontos) | ForEach-Object { "−$($_.Pontos)  $($_.Motivo)" }) -join "`r`n" } else { 'Nenhum ponto perdido.' }
+    $script:UI.AnelInicio.Parent.ToolTip = "Saúde do PC: $($Diag.Nota) de 100`r`n`r`n$explicacao`r`n`r`nDetalhes na aba Diagnóstico."
+
     $script:UI.ListaDicas.Children.Clear()
     foreach ($dica in $Diag.Dicas) {
         $linha = New-Object System.Windows.Controls.DockPanel
@@ -1589,7 +1643,9 @@ function Iniciar-Diagnostico {
     if ($script:DiagnosticoRodando) { return }
     $script:DiagnosticoRodando = $true
     $script:UI.TxtRotuloDiag.Text = 'Analisando...'
-    Iniciar-EmSegundoPlano -Trabalho { Obter-Diagnostico } -AoConcluir {
+    $ultima = Ler-Historico | Where-Object { $_.Tipo -eq 'Otimizacao' } | Select-Object -First 1
+    $dias = if ($ultima) { [int][math]::Floor(((Get-Date) - [datetime]$ultima.Data).TotalDays) } else { -1 }
+    Iniciar-EmSegundoPlano -Parametros @{ Dias = $dias } -Trabalho { param($Dias) Obter-Diagnostico -DiasDesdeLimpeza $Dias } -AoConcluir {
         param($resultado, $erro)
         $script:DiagnosticoRodando = $false
         $diag = $resultado | Select-Object -First 1
@@ -1899,29 +1955,104 @@ $script:ScriptTesteInternet = {
     }
 }
 
-function Definir-ArcoVelocimetro {
-    # Meio círculo da esquerda para a direita (passando pelo topo), preenchido até $Fracao (0 a 1).
-    param($Caminho, [double]$Fracao)
-    $cx = 130; $cy = 135; $r = 110
-    $f = [math]::Max(0.001, [math]::Min(1, $Fracao))
-    $angulo = [math]::PI * (1 - $f)
+# Velocímetro estilo speedtest: arco de 240° (de -120° a +120°, 0° = para cima),
+# marcas com espaçamento igual e um ponteiro que corre suavemente até o valor medido.
+$script:MarcasVelocidade = @(0, 5, 10, 50, 100, 250, 500, 750, 1000)
+$script:Velo = @{ Atual = 0.0; Alvo = 0.0 }
+$script:CentroVelo = @{ X = 145; Y = 135; Raio = 110 }
+
+function Obter-PontoVelocimetro {
+    param([double]$Graus, [double]$Raio)
+    $rad = $Graus * [math]::PI / 180
+    return New-Object System.Windows.Point(($script:CentroVelo.X + $Raio * [math]::Sin($rad)), ($script:CentroVelo.Y - $Raio * [math]::Cos($rad)))
+}
+
+function Obter-AnguloVelocidade {
+    # Cada intervalo entre marcas ocupa a mesma fatia do arco (30°)
+    param([double]$Mbps)
+    $m = $script:MarcasVelocidade
+    if ($Mbps -le 0) { return -120 }
+    for ($i = 1; $i -lt $m.Count; $i++) {
+        if ($Mbps -le $m[$i]) { return -120 + ($i - 1 + ($Mbps - $m[$i - 1]) / ($m[$i] - $m[$i - 1])) * 30 }
+    }
+    return 120
+}
+
+function Definir-ArcoGraus {
+    param($Caminho, [double]$De, [double]$Ate)
+    if ($Ate - $De -lt 0.5) { $Caminho.Data = $null; return }
+    $r = $script:CentroVelo.Raio
     $figura = New-Object System.Windows.Media.PathFigure
-    $figura.StartPoint = New-Object System.Windows.Point(($cx - $r), $cy)
-    $fim = New-Object System.Windows.Point(($cx + $r * [math]::Cos($angulo)), ($cy - $r * [math]::Sin($angulo)))
-    $arco = New-Object System.Windows.Media.ArcSegment($fim, (New-Object System.Windows.Size($r, $r)), 0, $false,
-        [System.Windows.Media.SweepDirection]::Clockwise, $true)
+    $figura.StartPoint = Obter-PontoVelocimetro $De $r
+    $arco = New-Object System.Windows.Media.ArcSegment((Obter-PontoVelocimetro $Ate $r), (New-Object System.Windows.Size($r, $r)), 0,
+        (($Ate - $De) -gt 180), [System.Windows.Media.SweepDirection]::Clockwise, $true)
     $figura.Segments.Add($arco)
     $geometria = New-Object System.Windows.Media.PathGeometry
     $geometria.Figures.Add($figura)
     $Caminho.Data = $geometria
 }
 
-function Definir-Velocimetro {
+function Montar-Velocimetro {
+    Definir-ArcoGraus $script:UI.ArcoFundoInternet -120 120
+    $marcas = $script:UI.MarcasVelocimetro
+    $marcas.Children.Clear()
+    for ($i = 0; $i -lt $script:MarcasVelocidade.Count; $i++) {
+        $graus = -120 + $i * 30
+        $a = Obter-PontoVelocimetro $graus 92
+        $b = Obter-PontoVelocimetro $graus 98
+        $risco = New-Object System.Windows.Shapes.Line
+        $risco.X1 = $a.X; $risco.Y1 = $a.Y; $risco.X2 = $b.X; $risco.Y2 = $b.Y
+        $risco.Stroke = Pincel '#3A4A6B'; $risco.StrokeThickness = 2
+        $marcas.Children.Add($risco) | Out-Null
+        $p = Obter-PontoVelocimetro $graus 78
+        $rotulo = Novo-Texto ([string]$script:MarcasVelocidade[$i]) 11 '#8A97AD'
+        $rotulo.Width = 40; $rotulo.TextAlignment = 'Center'
+        [System.Windows.Controls.Canvas]::SetLeft($rotulo, $p.X - 20)
+        [System.Windows.Controls.Canvas]::SetTop($rotulo, $p.Y - 8)
+        $marcas.Children.Add($rotulo) | Out-Null
+    }
+    Definir-CorFase 'download'
+    Desenhar-Velocimetro 0
+}
+
+function Definir-CorFase {
+    # Download em azul-verde e upload em roxo-rosa, como nos sites de speedtest
+    param([string]$Fase)
+    $cores = if ($Fase -eq 'upload') { '#8B5CF6', '#EC4899' } else { '#06B6D4', '#22C55E' }
+    $gradiente = New-Object System.Windows.Media.LinearGradientBrush
+    $gradiente.StartPoint = New-Object System.Windows.Point(0, 0)
+    $gradiente.EndPoint = New-Object System.Windows.Point(1, 0)
+    $gradiente.GradientStops.Add((New-Object System.Windows.Media.GradientStop(([System.Windows.Media.ColorConverter]::ConvertFromString($cores[0])), 0)))
+    $gradiente.GradientStops.Add((New-Object System.Windows.Media.GradientStop(([System.Windows.Media.ColorConverter]::ConvertFromString($cores[1])), 1)))
+    $script:UI.ArcoInternet.Stroke = $gradiente
+    $script:UI.TxtUnidadeFase.Text = switch ($Fase) { 'download' { 'Mbps · download' } 'upload' { 'Mbps · upload' } default { 'Mbps' } }
+}
+
+function Desenhar-Velocimetro {
     param([double]$Mbps)
-    # Escala logarítmica: 1 Mbps já aparece e 1000 Mbps enche o arco
-    $fracao = [math]::Log10(1 + $Mbps) / [math]::Log10(1001)
-    Definir-ArcoVelocimetro $script:UI.ArcoInternet $fracao
+    $graus = Obter-AnguloVelocidade $Mbps
+    $script:UI.Ponteiro.RenderTransform.Angle = $graus
+    Definir-ArcoGraus $script:UI.ArcoInternet -120 $graus
     $script:UI.TxtVelocidade.Text = Formatar-Mbps $Mbps
+}
+
+function Definir-Velocimetro {
+    # Só muda o alvo; o timer do velocímetro leva o ponteiro até lá suavemente (~60 quadros/s)
+    param([double]$Mbps)
+    $script:Velo.Alvo = [math]::Max(0, $Mbps)
+    if (-not $script:UI.TimerVelocimetro) {
+        $t = New-Object System.Windows.Threading.DispatcherTimer
+        $t.Interval = [TimeSpan]::FromMilliseconds(16)
+        $t.Add_Tick({
+            $v = $script:Velo
+            $v.Atual += ($v.Alvo - $v.Atual) * 0.12
+            if ([math]::Abs($v.Alvo - $v.Atual) -lt 0.05) { $v.Atual = $v.Alvo }
+            Desenhar-Velocimetro $v.Atual
+            if ($v.Atual -eq $v.Alvo -and -not $script:TesteInternet) { $script:UI.TimerVelocimetro.Stop() }
+        })
+        $script:UI.TimerVelocimetro = $t
+    }
+    $script:UI.TimerVelocimetro.Start()
 }
 
 function Formatar-Mbps {
@@ -1962,6 +2093,8 @@ function Ao-TestarInternet {
     $script:UI.TxtFaseTeste.Text = 'Conectando...'
     $script:UI.ListaAvaliacao.Children.Clear()
     $script:UI.ListaAvaliacao.Children.Add((Novo-Texto 'Aguarde uns 20 segundos...' 12.5 '#8A97AD')) | Out-Null
+    $script:UltimaFaseInternet = $null
+    Definir-CorFase 'inicio'
     Definir-Velocimetro 0
     Iniciar-EmSegundoPlano -Trabalho $script:ScriptTesteInternet -Parametros @{ P = $p } -AoConcluir {
         param($resultado, $erro)
@@ -1978,6 +2111,7 @@ function Ao-TestarInternet {
         }
         Atualizar-TesteInternet $p
         $script:UI.TxtFaseTeste.Text = 'Teste concluído'
+        Definir-CorFase 'download'
         Definir-Velocimetro $p.Download
         $avaliacao = Avaliar-Internet $p
         for ($i = 0; $i -lt $avaliacao.Count; $i += 2) {
@@ -1995,7 +2129,13 @@ function Atualizar-TesteInternet {
     param($P)
     $fases = @{ inicio = 'Conectando...'; ping = 'Medindo o ping...'; download = 'Testando download...'; upload = 'Testando upload...'; fim = 'Teste concluído' }
     if ($fases.ContainsKey([string]$P.Fase)) { $script:UI.TxtFaseTeste.Text = $fases[[string]$P.Fase] }
+    if ($P.Fase -ne $script:UltimaFaseInternet) {
+        # Troca de etapa: muda a cor e o ponteiro volta a zero antes de subir de novo
+        $script:UltimaFaseInternet = $P.Fase
+        if ($P.Fase -in 'download', 'upload') { Definir-CorFase $P.Fase }
+    }
     if ($P.Fase -in 'download', 'upload') { Definir-Velocimetro ([double]$P.Mbps) }
+    elseif ($P.Fase -in 'inicio', 'ping') { Definir-Velocimetro 0 }
     if ($P.Ping) { $script:UI.TxtPing.Text = [string]$P.Ping; $script:UI.TxtJitter.Text = [string]$P.Jitter }
     if ($P.Download) { $script:UI.TxtDownload.Text = Formatar-Mbps $P.Download }
     if ($P.Upload) { $script:UI.TxtUpload.Text = Formatar-Mbps $P.Upload }
@@ -2150,14 +2290,14 @@ function Criar-Janela {
     $script:UI.Janela = $janela
     $nomes = 'BarraTitulo', 'TxtVersao', 'BtnAtualizar', 'TxtBtnAtualizar', 'BtnMinimizar', 'BtnFechar',
              'PontoSaude', 'TxtSaudeLateral', 'NavInicio', 'NavDiagnostico', 'NavInternet', 'NavHistorico', 'NavInicializacao', 'NavConfig',
-             'PaginaInternet', 'ArcoFundoInternet', 'ArcoInternet', 'TxtVelocidade', 'TxtFaseTeste', 'BtnTestarInternet', 'TxtBtnTestar',
+             'PaginaInternet', 'ArcoFundoInternet', 'ArcoInternet', 'MarcasVelocimetro', 'Ponteiro', 'TxtUnidadeFase', 'TxtVelocidade', 'TxtFaseTeste', 'BtnTestarInternet', 'TxtBtnTestar',
              'TxtServidorTeste', 'TxtDownload', 'TxtUpload', 'TxtPing', 'TxtJitter', 'ListaAvaliacao',
              'Overlay', 'CanvasLixo', 'CorpoLixeira', 'TampaLixeira', 'SeloConcluido', 'TxtAnimTitulo', 'TxtAnimDetalhe', 'BtnFecharAnim',
              'PaginaInicio', 'PaginaDiagnostico', 'PaginaHistorico', 'PaginaInicializacao', 'PaginaConfig',
              'ListaAcoes', 'BtnLimparLog', 'TxtLog', 'AnelInicio', 'TxtNotaInicio', 'TxtEstado', 'TxtSelecionadas', 'BtnExplicar',
              'BarraProgresso', 'BtnOtimizar', 'BtnAnalisar', 'ListaStatus', 'BtnVerHistorico', 'TxtUltimaLimpeza',
              'TxtBackup', 'BtnDesfazer', 'BtnEsvaziar', 'BtnAtualizarDiag', 'AnelDiag', 'TxtNotaDiag', 'TxtRotuloDiag',
-             'ListaDicas', 'TxtDiagnostico', 'TxtHistoricoVazio', 'ListaHistorico', 'BtnAbrirInicializacao',
+             'ListaDicas', 'ListaDescontos', 'TxtDiagnostico', 'TxtHistoricoVazio', 'ListaHistorico', 'BtnAbrirInicializacao',
              'ListaConfigAcoes', 'ChkVerificarAtualizacoes', 'BtnProcurarAtualizacao', 'TxtStatusAtualizacao',
              'TxtSobre', 'BtnNovidades'
     foreach ($nome in $nomes) { $script:UI[$nome] = $janela.FindName($nome) }
@@ -2187,8 +2327,7 @@ function Criar-Janela {
     Criar-ListaStatus
     Definir-Anel $script:UI.AnelInicio 0.5 84 8
     Definir-Anel $script:UI.AnelDiag 0.5 150 12
-    Definir-ArcoVelocimetro $script:UI.ArcoFundoInternet 1
-    Definir-Velocimetro 0
+    Montar-Velocimetro
 
     # Janela
     $script:UI.BarraTitulo.Add_MouseLeftButtonDown({ $script:UI.Janela.DragMove() })
@@ -2240,6 +2379,7 @@ function Criar-Janela {
     $janela.Add_ContentRendered({ Ao-Abrir })
     $janela.Add_Closed({
         foreach ($t in $script:UI.Timers) { $t.Stop() }
+        if ($script:UI.TimerVelocimetro) { $script:UI.TimerVelocimetro.Stop() }
         if ($script:Pool) { $script:Pool.Close() }
     })
     return $janela
