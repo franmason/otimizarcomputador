@@ -51,24 +51,44 @@ $cabecalhos = @{
     'User-Agent'           = 'OtimizadorPC-Publicar'
 }
 
-# 3. Cria a Release
+# 3. Cria a Release, ou reaproveita a que já existe (ex.: uma tentativa anterior falhou no meio)
 $tag   = "v$($info.versao)"
 $notas = if ($info.notas) { $info.notas } else { "Versão $($info.versao)" }
-$corpo = @{ tag_name = $tag; name = "Otimizador de PC $($info.versao)"; body = $notas } | ConvertTo-Json
-Write-Host "Criando a Release $tag em $repo..."
-try {
-    $release = Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/$repo/releases" -Headers $cabecalhos `
-        -Body ([Text.Encoding]::UTF8.GetBytes($corpo)) -ContentType 'application/json; charset=utf-8'
-} catch {
-    Write-Host "Falha ao criar a Release (a tag $tag já existe?): $($_.Exception.Message)" -ForegroundColor Red; exit 1
+$release = $null
+try { $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/tags/$tag" -Headers $cabecalhos } catch { }
+if ($release) {
+    Write-Host "A Release $tag já existe; completando os arquivos que faltam..."
+} else {
+    $corpo = @{ tag_name = $tag; name = "Otimizador de PC $($info.versao)"; body = $notas } | ConvertTo-Json
+    Write-Host "Criando a Release $tag em $repo..."
+    try {
+        $release = Invoke-RestMethod -Method Post -Uri "https://api.github.com/repos/$repo/releases" -Headers $cabecalhos `
+            -Body ([Text.Encoding]::UTF8.GetBytes($corpo)) -ContentType 'application/json; charset=utf-8'
+    } catch {
+        Write-Host "Falha ao criar a Release: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host 'Se o GitHub estiver instável, espere um pouco e rode de novo: a Release será completada.' -ForegroundColor Yellow
+        exit 1
+    }
 }
 
-# 4. Anexa o instalador e o versao.json
+# 4. Anexa o instalador e o versao.json (troca os que já existirem, para ficarem iguais aos daqui)
 $baseUpload = $release.upload_url -replace '\{.*\}$', ''
 foreach ($arquivo in $exe, $jsonPath) {
     $nome = Split-Path -Leaf $arquivo
-    Write-Host "Enviando $nome..."
-    [void](Invoke-RestMethod -Method Post -Uri "$($baseUpload)?name=$nome" -Headers $cabecalhos `
-        -InFile $arquivo -ContentType 'application/octet-stream')
+    $antigo = $release.assets | Where-Object { $_.name -eq $nome }
+    if ($antigo) {
+        Write-Host "Substituindo $nome..."
+        [void](Invoke-RestMethod -Method Delete -Uri "https://api.github.com/repos/$repo/releases/assets/$($antigo.id)" -Headers $cabecalhos)
+    } else {
+        Write-Host "Enviando $nome..."
+    }
+    try {
+        [void](Invoke-RestMethod -Method Post -Uri "$($baseUpload)?name=$nome" -Headers $cabecalhos `
+            -InFile $arquivo -ContentType 'application/octet-stream')
+    } catch {
+        Write-Host "Falha ao enviar ${nome}: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host 'Rode o Publicar-Atualizacao.ps1 de novo: ele completa a Release.' -ForegroundColor Yellow
+        exit 1
+    }
 }
 Write-Host "Publicado: $($release.html_url)" -ForegroundColor Green
