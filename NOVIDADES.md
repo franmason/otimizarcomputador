@@ -5,6 +5,10 @@ O `Gerar-EXE.ps1` usa a seção da versão que está sendo gerada: ela aparece p
 antes de atualizar, depois de atualizar e na página de Releases do GitHub.
 Escreva para quem usa o app, em frases curtas.
 
+## 1.2.1
+- Logo nova: aparece no ícone da Área de Trabalho, na barra de tarefas e no canto da janela.
+- Teste de internet: a oscilação (jitter) ficou mais precisa; um ping lento isolado não gera mais alerta falso.
+
 ## 1.2.0
 - Visual novo, com tema escuro e menu lateral.
 - Nota de saúde do PC (0 a 100) com dicas do que melhorar.

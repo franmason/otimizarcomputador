@@ -1,0 +1,11 @@
+Coloque aqui a imagem da logo do Otimizador de PC (hoje: logo.png).
+O Gerar-EXE.ps1 usa a primeira imagem .png/.jpg desta pasta e gera o icone.ico sozinho.
+Se a logo for redonda sobre fundo liso, o fundo fora do círculo vira transparente.
+
+Formato ideal:
+- PNG com fundo transparente (JPG também serve, mas fica com fundo)
+- Quadrada (mesma largura e altura), de preferência 512 x 512 ou maior
+- Desenho simples, que ainda dê para reconhecer bem pequeno (16 x 16, no canto da barra de tarefas)
+
+Depois que a imagem estiver aqui, ela vira o ícone do .exe, do atalho na Área de Trabalho,
+da barra de tarefas e do Painel de Controle, e aparece no canto da janela do app.

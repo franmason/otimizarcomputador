@@ -4,3 +4,6 @@ versao.json
 
 # Capturas dos testes de interface
 testes/saida/
+
+# Gerado pelo Gerar-EXE.ps1 a partir da logo
+logo/icone.ico

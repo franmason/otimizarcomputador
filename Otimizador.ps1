@@ -41,8 +41,9 @@ Add-Type -AssemblyName WindowsBase
 # ------------------------------------------------------------------ Configuração
 
 $script:NomeApp          = 'Otimizador de PC'
-$script:Versao           = '1.2.0'
+$script:Versao           = '1.2.1'
 $script:NotasVersao     = ''   # preenchido pelo Gerar-EXE.ps1 com a seção desta versão do NOVIDADES.md
+$script:LogoBase64      = ''   # preenchido pelo Gerar-EXE.ps1 com a logo da pasta "logo" (PNG 96 x 96)
 $script:PastaInstalacao  = Join-Path $env:LOCALAPPDATA 'Programs\OtimizadorPC'
 $script:ExeInstalado     = Join-Path $script:PastaInstalacao 'Otimizador.exe'
 $script:ChaveDesinstalar = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\OtimizadorPC'
@@ -1047,7 +1048,8 @@ $script:Xaml = @'
       <!-- Barra de título -->
       <Grid x:Name="BarraTitulo" Grid.Row="0" Background="#0A101C">
         <StackPanel Orientation="Horizontal" Margin="18,0,0,0" VerticalAlignment="Center">
-          <Border Width="28" Height="28" CornerRadius="8">
+          <Image x:Name="ImgLogo" Width="30" Height="30" Visibility="Collapsed" RenderOptions.BitmapScalingMode="HighQuality"/>
+          <Border x:Name="LogoPadrao" Width="28" Height="28" CornerRadius="8">
             <Border.Background>
               <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
                 <GradientStop Color="#3B82F6" Offset="0"/>
@@ -2911,11 +2913,24 @@ function Fechar-AnimacaoOtimizacao {
     $ui.Overlay.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $sumir)
 }
 
+function Obter-ImagemLogo {
+    if (-not $script:LogoBase64) { return $null }
+    try {
+        $imagem = New-Object System.Windows.Media.Imaging.BitmapImage
+        $imagem.BeginInit()
+        $imagem.StreamSource = New-Object System.IO.MemoryStream(, [Convert]::FromBase64String($script:LogoBase64))
+        $imagem.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+        $imagem.EndInit()
+        $imagem.Freeze()
+        return $imagem
+    } catch { return $null }
+}
+
 function Criar-Janela {
     $janela = [System.Windows.Markup.XamlReader]::Parse($script:Xaml)
     $script:UI.Janela = $janela
     $nomes = 'BarraTitulo', 'TxtVersao', 'BtnAtualizar', 'TxtBtnAtualizar', 'BtnMinimizar', 'BtnFechar',
-             'PontoSaude', 'TxtSaudeLateral', 'NavInicio', 'NavDiagnostico', 'NavInternet', 'NavHistorico', 'NavInicializacao', 'NavConfig',
+             'ImgLogo', 'LogoPadrao', 'PontoSaude', 'TxtSaudeLateral', 'NavInicio', 'NavDiagnostico', 'NavInternet', 'NavHistorico', 'NavInicializacao', 'NavConfig',
              'NavMonitor', 'NavFerramentas', 'PaginaMonitor', 'PaginaFerramentas', 'GradeMonitor', 'PontoAoVivo', 'CartaoStatus',
              'BtnMemoriaChrome', 'BtnMemoriaEdge', 'BtnAtualizarProgramas', 'ListaProgramas', 'BtnTestarMicrofone',
              'BtnPermissaoMicrofone', 'BtnPainelSom', 'TxtTempoLigado', 'BtnReiniciar', 'TxtBateria', 'BtnArquivosGrandes',
@@ -2933,6 +2948,15 @@ function Criar-Janela {
     foreach ($nome in $nomes) { $script:UI[$nome] = $janela.FindName($nome) }
 
     $script:UI.TxtVersao.Text = "v$($script:Versao)"
+
+    # Logo embutida pelo Gerar-EXE.ps1 (canto da janela e ícone da barra de tarefas)
+    $logo = Obter-ImagemLogo
+    if ($logo) {
+        $script:UI.ImgLogo.Source = $logo
+        $script:UI.ImgLogo.Visibility = 'Visible'
+        $script:UI.LogoPadrao.Visibility = 'Collapsed'
+        $janela.Icon = $logo
+    }
     $script:UI.TxtSobre.Text = "$($script:NomeApp) versão $($script:Versao)`r`nCódigo e novidades: github.com/$($script:RepoGitHub)"
 
     # Ações (tela inicial) e preferências (configurações)
@@ -3211,6 +3235,7 @@ function Mostrar-Instalador {
     $form.MaximizeBox = $false
     $form.MinimizeBox = $false
     $form.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+    try { $form.Icon = [System.Drawing.Icon]::ExtractAssociatedIcon((Obter-ExeAtual)) } catch { }   # ícone do próprio .exe
     $script:UI.Form = $form
 
     $titulo = New-Object System.Windows.Forms.Label
